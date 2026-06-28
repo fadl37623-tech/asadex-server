@@ -4,7 +4,7 @@ import hashlib
 import re
 import os
 
-app = Flask(name)
+app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
