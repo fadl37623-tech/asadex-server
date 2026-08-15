@@ -45,6 +45,14 @@ def init_db():
             solve_count INTEGER NOT NULL DEFAULT 0,
             last_reset_time TIMESTAMP NOT NULL DEFAULT NOW()
         )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS feedback (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER,
+            rating INTEGER,
+            feedback_type TEXT,
+            message TEXT,
+            date TIMESTAMP DEFAULT NOW()
+        )''')
         conn.commit()
         conn.close()
         return jsonify({"status": "ok"})
@@ -211,7 +219,68 @@ def get_questions(user_id):
         return jsonify({"questions": [list(r) for r in rows]})
     except Exception as e:
         return jsonify({"questions": [], "msg": str(e)})
+@app.route("/feedback", methods=["POST"])
+def submit_feedback():
+    data = request.json or {}
 
+    user_id = data.get("user_id")
+    rating = data.get("rating")
+    feedback_type = data.get("feedback_type", "General feedback")
+    message = data.get("message", "").strip()
+
+    if not rating:
+        return jsonify({
+            "ok": False,
+            "msg": "Please select a rating."
+        }), 400
+
+    if not message:
+        return jsonify({
+            "ok": False,
+            "msg": "Please write your feedback."
+        }), 400
+
+    try:
+        rating = int(rating)
+
+        if rating < 1 or rating > 5:
+            return jsonify({
+                "ok": False,
+                "msg": "Rating must be between 1 and 5."
+            }), 400
+
+    except:
+        return jsonify({
+            "ok": False,
+            "msg": "Invalid rating."
+        }), 400
+
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+
+        c.execute(
+            """
+            INSERT INTO feedback
+            (user_id, rating, feedback_type, message)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (user_id, rating, feedback_type, message)
+        )
+
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "ok": True,
+            "msg": "Feedback submitted successfully."
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "msg": str(e)
+        }), 500
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
