@@ -1,10 +1,86 @@
 from flask import Flask, request, jsonify
+from authlib.integrations.flask_client import OAuth
 import psycopg2
 import hashlib
 import re
 import os
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32))
+
+oauth = OAuth(app)
+
+google = oauth.register(
+    name="google",
+    client_id=os.environ.get("GOOGLE_CLIENT_ID"),
+    client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
+    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+    client_kwargs={
+        "scope": "openid email profile"
+    },
+)
+@app.route("/auth/google", methods=["GET"])
+def google_login():
+    redirect_uri = "https://asadex-server.onrender.com/auth/google/callback"
+    return google.authorize_redirect(redirect_uri)
+
+
+@app.route("/auth/google/callback", methods=["GET"])
+def google_callback():
+    try:
+        token = google.authorize_access_token()
+        user_info = token.get("userinfo")
+
+        if not user_info:
+            user_info = google.userinfo(token=token)
+
+        google_id = user_info.get("sub")
+        email = user_info.get("email", "").strip().lower()
+        name = user_info.get("name", "").strip()
+
+        if not google_id or not email:
+            return "Google account information is incomplete.", 400
+
+        if not name:
+            name = email.split("@")[0]
+
+        conn = get_conn()
+        c = conn.cursor()
+
+        c.execute(
+            "SELECT * FROM students WHERE email=%s",
+            (email,)
+        )
+        user = c.fetchone()
+
+        if not user:
+            random_password = os.urandom(32).hex()
+
+            c.execute(
+                """
+                INSERT INTO students (email, password, name)
+                VALUES (%s, %s, %s)
+                RETURNING *
+                """,
+                (email, hash_password(random_password), name)
+            )
+            user = c.fetchone()
+
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "ok": True,
+            "user": list(user),
+            "google_id": google_id,
+            "msg": "Google login successful"
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "msg": str(e)
+        }), 500
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
