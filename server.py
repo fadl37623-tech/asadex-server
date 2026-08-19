@@ -1,11 +1,9 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 from authlib.integrations.flask_client import OAuth
-
 import psycopg2
 import hashlib
 import re
 import os
-
 
 # ============================================================
 # Flask
@@ -18,27 +16,18 @@ app.secret_key = os.environ.get(
     os.urandom(32)
 )
 
-
-# ============================================================
-# Environment variables
-# ============================================================
-
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
-
-
 # ============================================================
-# OAuth
+# Google OAuth
 # ============================================================
 
 oauth = OAuth(app)
 
 google = oauth.register(
     name="google",
-    client_id=GOOGLE_CLIENT_ID,
-    client_secret=GOOGLE_CLIENT_SECRET,
+    client_id=os.environ.get("GOOGLE_CLIENT_ID"),
+    client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
     server_metadata_url=(
         "https://accounts.google.com/"
         ".well-known/openid-configuration"
@@ -48,34 +37,25 @@ google = oauth.register(
     },
 )
 
-
 # ============================================================
 # Settings
 # ============================================================
 
 DAILY_LIMIT = 23
 
+BASE_URL = "https://asadex-server.onrender.com"
 
 # ============================================================
 # Database
 # ============================================================
 
+
 def get_conn():
-
-    if not DATABASE_URL:
-        raise RuntimeError(
-            "DATABASE_URL environment variable is not configured"
-        )
-
     return psycopg2.connect(
         DATABASE_URL,
         sslmode="require"
     )
 
-
-# ============================================================
-# Helpers
-# ============================================================
 
 def hash_password(password):
     return hashlib.sha256(
@@ -83,8 +63,12 @@ def hash_password(password):
     ).hexdigest()
 
 
-def validate_email(email):
+# ============================================================
+# Validation
+# ============================================================
 
+
+def validate_email(email):
     pattern = r'^[\w\.-]+@[\w\.-]+\.\w{2,}$'
 
     return (
@@ -100,19 +84,15 @@ def validate_email(email):
 # Google OAuth
 # ============================================================
 
-@app.route("/auth/google", methods=["GET"])
+
+@app.route(
+    "/auth/google",
+    methods=["GET"]
+)
 def google_login():
 
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-
-        return jsonify({
-            "ok": False,
-            "msg": "Google OAuth is not configured on the server."
-        }), 500
-
     redirect_uri = (
-        "https://asadex-server.onrender.com/"
-        "auth/google/callback"
+        f"{BASE_URL}/auth/google/callback"
     )
 
     return google.authorize_redirect(
@@ -120,10 +100,11 @@ def google_login():
     )
 
 
-@app.route("/auth/google/callback", methods=["GET"])
+@app.route(
+    "/auth/google/callback",
+    methods=["GET"]
+)
 def google_callback():
-
-    conn = None
 
     try:
 
@@ -158,22 +139,33 @@ def google_callback():
             .strip()
         )
 
-        if not google_id or not email:
+        # ----------------------------------------------------
+        # Validate Google data
+        # ----------------------------------------------------
+
+        if not google_id:
 
             return jsonify({
                 "ok": False,
-                "msg": (
-                    "Google account information "
-                    "is incomplete."
-                )
+                "msg": "Google ID is missing."
+            }), 400
+
+        if not validate_email(email):
+
+            return jsonify({
+                "ok": False,
+                "msg": "Invalid Google email."
             }), 400
 
         if not name:
 
             name = email.split("@")[0]
 
-        conn = get_conn()
+        # ----------------------------------------------------
+        # Database
+        # ----------------------------------------------------
 
+        conn = get_conn()
         c = conn.cursor()
 
         # ----------------------------------------------------
@@ -190,18 +182,16 @@ def google_callback():
         )
 
         user = c.fetchone()
+
         if user:
 
             conn.close()
-            conn = None
-
             return jsonify({
                 "ok": True,
                 "user": list(user),
                 "google_id": google_id,
                 "msg": "Google login successful"
             })
-
 
         # ----------------------------------------------------
         # 2. Search by email
@@ -222,7 +212,10 @@ def google_callback():
 
             user_id = user[0]
 
-            # Link existing account with Google
+            # -----------------------------------------------
+            # Link Google to existing account
+            # -----------------------------------------------
+
             c.execute(
                 """
                 UPDATE students
@@ -237,7 +230,6 @@ def google_callback():
 
             conn.commit()
 
-            # Get updated user
             c.execute(
                 """
                 SELECT *
@@ -250,7 +242,6 @@ def google_callback():
             user = c.fetchone()
 
             conn.close()
-            conn = None
 
             return jsonify({
                 "ok": True,
@@ -262,6 +253,202 @@ def google_callback():
                 )
             })
 
+        # ----------------------------------------------------
+        # 3. Create new Asadex account
+        # ----------------------------------------------------
+
+        random_password = os.urandom(
+            32
+        ).hex()
+
+        c.execute(
+            """
+            INSERT INTO students
+            (
+                email,
+                password,
+                name,
+                google_id
+            )
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+            """,
+            (
+                email,
+                hash_password(
+                    random_password
+                ),
+                name,
+                google_id
+            )
+        )
+
+        user = c.fetchone()
+
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "ok": True,
+            "user": list(user),
+            "google_id": google_id,
+            "msg": (
+                "Google account "
+                "created successfully"
+            )
+        })
+
+    except Exception as e:
+
+        print(
+            "Google callback error:",
+            e
+        )
+
+        return jsonify({
+            "ok": False,
+            "msg": str(e)
+        }), 500
+
+
+# ============================================================
+# Google login API
+# ============================================================
+
+@app.route(
+    "/google-login",
+    methods=["POST"]
+)
+def google_login_api():
+
+    data = request.json or {}
+
+    google_id = str(
+        data.get(
+            "google_id",
+            ""
+        )
+    ).strip()
+
+    email = (
+        data.get(
+            "email",
+            ""
+        )
+        .strip()
+        .lower()
+    )
+
+    name = (
+        data.get(
+            "name",
+            ""
+        )
+        .strip()
+    )
+
+    # --------------------------------------------------------
+    # Validation
+    # --------------------------------------------------------
+
+    if not google_id:
+
+        return jsonify({
+            "user": None,
+            "msg": "Google ID is missing"
+        }), 400
+
+    if not validate_email(email):
+
+        return jsonify({
+            "user": None,
+            "msg": "Invalid Google email"
+        }), 400
+
+    if not name:
+
+        name = email.split("@")[0]
+
+    try:
+
+        conn = get_conn()
+        c = conn.cursor()
+
+        # ----------------------------------------------------
+        # 1. Existing Google account
+        # ----------------------------------------------------
+        c.execute(
+            """
+            SELECT *
+            FROM students
+            WHERE google_id=%s
+            """,
+            (google_id,)
+        )
+
+        user = c.fetchone()
+
+        if user:
+
+            conn.close()
+
+            return jsonify({
+                "user": list(user),
+                "google_id": google_id,
+                "msg": ""
+            })
+
+        # ----------------------------------------------------
+        # 2. Existing email account
+        # ----------------------------------------------------
+
+        c.execute(
+            """
+            SELECT *
+            FROM students
+            WHERE email=%s
+            """,
+            (email,)
+        )
+
+        user = c.fetchone()
+
+        if user:
+
+            user_id = user[0]
+
+            c.execute(
+                """
+                UPDATE students
+                SET google_id=%s
+                WHERE id=%s
+                """,
+                (
+                    google_id,
+                    user_id
+                )
+            )
+
+            conn.commit()
+
+            c.execute(
+                """
+                SELECT *
+                FROM students
+                WHERE id=%s
+                """,
+                (user_id,)
+            )
+
+            user = c.fetchone()
+
+            conn.close()
+
+            return jsonify({
+                "user": list(user),
+                "google_id": google_id,
+                "msg": ""
+            })
 
         # ----------------------------------------------------
         # 3. Create new account
@@ -296,37 +483,23 @@ def google_callback():
         user = c.fetchone()
 
         conn.commit()
-
         conn.close()
-        conn = None
 
         return jsonify({
-            "ok": True,
             "user": list(user),
             "google_id": google_id,
-            "msg": (
-                "Google account created "
-                "successfully"
-            )
+            "msg": ""
         })
 
     except Exception as e:
 
-        if conn:
-
-            try:
-                conn.rollback()
-                conn.close()
-            except:
-                pass
-
         print(
-            "Google callback error:",
+            "Google API error:",
             e
         )
 
         return jsonify({
-            "ok": False,
+            "user": None,
             "msg": str(e)
         }), 500
 
@@ -335,15 +508,16 @@ def google_callback():
 # Initialize database
 # ============================================================
 
-@app.route("/init", methods=["GET"])
-def init_db():
 
-    conn = None
+@app.route(
+    "/init",
+    methods=["GET"]
+)
+def init_db():
 
     try:
 
         conn = get_conn()
-
         c = conn.cursor()
 
         # ----------------------------------------------------
@@ -353,27 +527,24 @@ def init_db():
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS students (
-
                 id SERIAL PRIMARY KEY,
-
                 email TEXT UNIQUE NOT NULL,
-
                 password TEXT NOT NULL,
-
                 name TEXT NOT NULL,
-
                 google_id TEXT
             )
             """
         )
 
-        # Add google_id to old databases
+        # Existing installations
         c.execute(
             """
             ALTER TABLE students
             ADD COLUMN IF NOT EXISTS google_id TEXT
             """
         )
+
+        # Unique Google ID
         c.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS
@@ -386,39 +557,29 @@ def init_db():
         # ----------------------------------------------------
         # Questions
         # ----------------------------------------------------
-
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS questions (
-
                 id SERIAL PRIMARY KEY,
-
                 user_id INTEGER,
-
                 question TEXT,
-
                 answer TEXT,
-
                 date TEXT
             )
             """
         )
 
         # ----------------------------------------------------
-        # Usage limits
+        # Daily usage
         # ----------------------------------------------------
 
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_limits (
-
                 user_id INTEGER PRIMARY KEY,
-
-                solve_count INTEGER
-                NOT NULL DEFAULT 0,
-
-                last_reset_time TIMESTAMP
-                NOT NULL DEFAULT NOW()
+                solve_count INTEGER NOT NULL DEFAULT 0,
+                last_reset_time
+                TIMESTAMP NOT NULL DEFAULT NOW()
             )
             """
         )
@@ -430,27 +591,18 @@ def init_db():
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS feedback (
-
                 id SERIAL PRIMARY KEY,
-
                 user_id INTEGER,
-
                 rating INTEGER,
-
                 feedback_type TEXT,
-
                 message TEXT,
-
-                date TIMESTAMP
-                DEFAULT NOW()
+                date TIMESTAMP DEFAULT NOW()
             )
             """
         )
 
         conn.commit()
-
         conn.close()
-        conn = None
 
         return jsonify({
             "status": "ok"
@@ -458,13 +610,10 @@ def init_db():
 
     except Exception as e:
 
-        if conn:
-
-            try:
-                conn.rollback()
-                conn.close()
-            except:
-                pass
+        print(
+            "Database init error:",
+            e
+        )
 
         return jsonify({
             "status": "error",
@@ -476,7 +625,11 @@ def init_db():
 # Register
 # ============================================================
 
-@app.route("/register", methods=["POST"])
+
+@app.route(
+    "/register",
+    methods=["POST"]
+)
 def register():
 
     data = request.json or {}
@@ -510,13 +663,13 @@ def register():
             "msg": "Invalid email format"
         })
 
-    if len(password) < 6:
+    if len(password) < 8:
 
         return jsonify({
             "ok": False,
             "msg": (
-                "Password must be "
-                "at least 6 characters"
+                "Password must be at least "
+                "8 characters"
             )
         })
 
@@ -525,17 +678,14 @@ def register():
         return jsonify({
             "ok": False,
             "msg": (
-                "Name must be "
-                "at least 2 characters"
+                "Name must be at least "
+                "2 characters"
             )
         })
-
-    conn = None
 
     try:
 
         conn = get_conn()
-
         c = conn.cursor()
 
         c.execute(
@@ -556,7 +706,6 @@ def register():
         )
 
         conn.commit()
-
         conn.close()
 
         return jsonify({
@@ -566,26 +715,14 @@ def register():
 
     except psycopg2.errors.UniqueViolation:
 
-        if conn:
-            conn.rollback()
-            conn.close()
-
         return jsonify({
             "ok": False,
             "msg": (
-                "This email is "
-                "already registered"
+                "This email is already registered"
             )
         })
 
     except Exception as e:
-
-        if conn:
-            try:
-                conn.rollback()
-                conn.close()
-            except:
-                pass
 
         return jsonify({
             "ok": False,
@@ -594,204 +731,14 @@ def register():
 
 
 # ============================================================
-# Google login API
+# Login
 # ============================================================
 
-@app.route("/google-login", methods=["POST"])
-def google_login_api():
 
-    data = request.json or {}
-
-    google_id = str(
-        data.get(
-            "google_id",
-            ""
-        )
-    ).strip()
-
-    email = (
-        data.get(
-            "email",
-            ""
-        )
-        .strip()
-        .lower()
-    )
-
-    name = (
-        data.get(
-            "name",
-            ""
-        )
-        .strip()
-    )
-
-    if not google_id:
-
-        return jsonify({
-            "user": None,
-            "msg": "Google ID is missing"
-        }), 400
-
-    if not validate_email(email):
-
-        return jsonify({
-            "user": None,
-            "msg": "Invalid Google email"
-        }), 400
-
-    if not name:
-
-        name = email.split("@")[0]
-
-    conn = None
-
-    try:
-
-        conn = get_conn()
-
-        c = conn.cursor()
-
-        # ----------------------------------------------------
-        # Search Google ID
-        # ----------------------------------------------------
-
-        c.execute(
-            """
-            SELECT *
-            FROM students
-            WHERE google_id=%s
-            """,
-            (google_id,)
-        )
-
-        user = c.fetchone()
-
-        if user:
-
-            conn.close()
-
-            return jsonify({
-                "user": list(user),
-                "google_id": google_id,
-                "msg": ""
-            })
-
-
-        # ----------------------------------------------------
-        # Search email
-        # ----------------------------------------------------
-
-        c.execute(
-            """
-            SELECT *
-            FROM students
-            WHERE email=%s
-            """,
-            (email,)
-        )
-
-        user = c.fetchone()
-
-        if user:
-
-            user_id = user[0]
-
-            c.execute(
-                """
-                UPDATE students
-                SET google_id=%s
-                WHERE id=%s
-                """,
-                (
-                    google_id,
-                    user_id
-                )
-            )
-
-            conn.commit()
-
-            c.execute(
-                """
-                SELECT *
-                FROM students
-                WHERE id=%s
-                """,
-                (user_id,)
-            )
-
-            user = c.fetchone()
-
-            conn.close()
-
-            return jsonify({
-                "user": list(user),
-                "google_id": google_id,
-                "msg": ""
-            })
-
-
-        # ----------------------------------------------------
-        # Create account
-        # ----------------------------------------------------
-
-        random_password = os.urandom(
-            32
-        ).hex()
-
-        c.execute(
-            """
-            INSERT INTO students
-            (
-                email,
-                password,
-                name,
-                google_id
-            )
-            VALUES (%s, %s, %s, %s)
-            RETURNING *
-            """,
-            (
-                email,
-                hash_password(
-                    random_password
-                ),
-                name,
-                google_id
-            )
-        )
-
-        user = c.fetchone()
-
-        conn.commit()
-
-        conn.close()
-
-        return jsonify({
-            "user": list(user),
-            "google_id": google_id,
-            "msg": ""
-        })
-
-    except Exception as e:
-
-        if conn:
-
-            try:
-                conn.rollback()
-                conn.close()
-            except:
-                pass
-
-        return jsonify({
-            "user": None,
-            "msg": str(e)
-        }), 500
-# ============================================================
-# Normal login
-# ============================================================
-
-@app.route("/login", methods=["POST"])
+@app.route(
+    "/login",
+    methods=["POST"]
+)
 def login():
 
     data = request.json or {}
@@ -818,21 +765,17 @@ def login():
         })
 
     if len(password) < 8:
-
         return jsonify({
             "user": None,
             "msg": (
-                "Password must be "
-                "at least 8 characters"
+                "Password must be at least "
+                "8 characters"
             )
         })
-
-    conn = None
 
     try:
 
         conn = get_conn()
-
         c = conn.cursor()
 
         c.execute(
@@ -862,19 +805,11 @@ def login():
         return jsonify({
             "user": None,
             "msg": (
-                "Incorrect email "
-                "or password"
+                "Incorrect email or password"
             )
         })
 
     except Exception as e:
-
-        if conn:
-
-            try:
-                conn.close()
-            except:
-                pass
 
         return jsonify({
             "user": None,
@@ -886,18 +821,16 @@ def login():
 # Get user
 # ============================================================
 
+
 @app.route(
     "/get_user/<int:user_id>",
     methods=["GET"]
 )
 def get_user_by_id(user_id):
 
-    conn = None
-
     try:
 
         conn = get_conn()
-
         c = conn.cursor()
 
         c.execute(
@@ -923,13 +856,6 @@ def get_user_by_id(user_id):
 
     except Exception as e:
 
-        if conn:
-
-            try:
-                conn.close()
-            except:
-                pass
-
         return jsonify({
             "user": None,
             "msg": str(e)
@@ -940,6 +866,7 @@ def get_user_by_id(user_id):
 # Daily limit
 # ============================================================
 
+
 @app.route(
     "/check_limit/<int:user_id>",
     methods=["POST"]
@@ -948,12 +875,9 @@ def check_limit(user_id):
 
     import datetime
 
-    conn = None
-
     try:
 
         conn = get_conn()
-
         c = conn.cursor()
 
         now = datetime.datetime.now()
@@ -997,6 +921,7 @@ def check_limit(user_id):
             conn.close()
 
             remaining = DAILY_LIMIT - 1
+
             return jsonify({
                 "allowed": True,
                 "remaining": remaining,
@@ -1007,7 +932,6 @@ def check_limit(user_id):
                 )
             })
 
-
         solve_count, last_reset_time = row
 
         time_passed = (
@@ -1015,7 +939,7 @@ def check_limit(user_id):
         )
 
         # ----------------------------------------------------
-        # New 24 hour cycle
+        # New 24-hour cycle
         # ----------------------------------------------------
 
         if time_passed >= datetime.timedelta(
@@ -1040,18 +964,16 @@ def check_limit(user_id):
             conn.close()
 
             remaining = DAILY_LIMIT - 1
-
             return jsonify({
                 "allowed": True,
                 "remaining": remaining,
                 "msg": (
-                    f"New 24-hour cycle "
-                    f"started! You have "
+                    "New 24-hour cycle "
+                    "started! You have "
                     f"{remaining} questions "
-                    f"left today."
+                    "left today."
                 )
             })
-
 
         # ----------------------------------------------------
         # Still has questions
@@ -1083,10 +1005,9 @@ def check_limit(user_id):
                 "msg": (
                     f"Success! You have "
                     f"{remaining} questions "
-                    f"left today."
+                    "left today."
                 )
             })
-
 
         # ----------------------------------------------------
         # Limit reached
@@ -1114,20 +1035,13 @@ def check_limit(user_id):
             "msg": (
                 f"Daily limit reached "
                 f"({DAILY_LIMIT} questions). "
-                f"Come back tomorrow! "
-                f"{hours}h {minutes}m remaining."
+                "Come back tomorrow! "
+                f"{hours}h {minutes}m "
+                "remaining."
             )
         })
 
     except Exception as e:
-
-        if conn:
-
-            try:
-                conn.rollback()
-                conn.close()
-            except:
-                pass
 
         return jsonify({
             "allowed": False,
@@ -1139,6 +1053,7 @@ def check_limit(user_id):
 # ============================================================
 # Save question
 # ============================================================
+
 
 @app.route(
     "/save_question",
@@ -1154,18 +1069,15 @@ def save_question():
         "%Y-%m-%d %H:%M"
     )
 
-    conn = None
-
     try:
 
         conn = get_conn()
-
         c = conn.cursor()
 
         c.execute(
             """
             INSERT INTO questions
-[8/19/2026 4:09 PM] عباس فاضل: (
+            (
                 user_id,
                 question,
                 answer,
@@ -1182,7 +1094,6 @@ def save_question():
         )
 
         conn.commit()
-
         conn.close()
 
         return jsonify({
@@ -1190,14 +1101,6 @@ def save_question():
         })
 
     except Exception as e:
-
-        if conn:
-
-            try:
-                conn.rollback()
-                conn.close()
-            except:
-                pass
 
         return jsonify({
             "ok": False,
@@ -1209,18 +1112,16 @@ def save_question():
 # Get questions
 # ============================================================
 
+
 @app.route(
     "/get_questions/<int:user_id>",
     methods=["GET"]
 )
 def get_questions(user_id):
 
-    conn = None
-
     try:
 
         conn = get_conn()
-
         c = conn.cursor()
 
         c.execute(
@@ -1249,22 +1150,14 @@ def get_questions(user_id):
 
     except Exception as e:
 
-        if conn:
-
-            try:
-                conn.close()
-            except:
-                pass
-
         return jsonify({
             "questions": [],
             "msg": str(e)
         })
-
-
 # ============================================================
 # Feedback
 # ============================================================
+
 
 @app.route(
     "/feedback",
@@ -1287,21 +1180,17 @@ def submit_feedback():
         "General feedback"
     )
 
-    message = (
-        data.get(
-            "message",
-            ""
-        )
-        .strip()
-    )
+    message = data.get(
+        "message",
+        ""
+    ).strip()
 
     if not rating:
 
         return jsonify({
             "ok": False,
             "msg": (
-                "Please select "
-                "a rating."
+                "Please select a rating."
             )
         }), 400
 
@@ -1310,8 +1199,7 @@ def submit_feedback():
         return jsonify({
             "ok": False,
             "msg": (
-                "Please write "
-                "your feedback."
+                "Please write your feedback."
             )
         }), 400
 
@@ -1329,19 +1217,16 @@ def submit_feedback():
                 )
             }), 400
 
-    except:
+    except Exception:
 
         return jsonify({
             "ok": False,
             "msg": "Invalid rating."
         }), 400
 
-    conn = None
-
     try:
 
         conn = get_conn()
-
         c = conn.cursor()
 
         c.execute(
@@ -1364,7 +1249,6 @@ def submit_feedback():
         )
 
         conn.commit()
-
         conn.close()
 
         return jsonify({
@@ -1377,14 +1261,6 @@ def submit_feedback():
 
     except Exception as e:
 
-        if conn:
-
-            try:
-                conn.rollback()
-                conn.close()
-            except:
-                pass
-
         return jsonify({
             "ok": False,
             "msg": str(e)
@@ -1392,8 +1268,26 @@ def submit_feedback():
 
 
 # ============================================================
+# Health check
+# ============================================================
+
+
+@app.route(
+    "/",
+    methods=["GET"]
+)
+def home():
+
+    return jsonify({
+        "status": "ok",
+        "service": "Asadex Server"
+    })
+
+
+# ============================================================
 # Run
 # ============================================================
+
 if __name__ == "__main__":
 
     port = int(
