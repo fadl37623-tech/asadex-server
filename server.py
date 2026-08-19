@@ -256,7 +256,121 @@ def register():
         return jsonify({"ok": False, "msg": "This email is already registered"})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)})
+    
+@app.route("/google-login", methods=["POST"])
+def google_login_api():
+    data = request.json or {}
 
+    google_id = str(data.get("google_id", "")).strip()
+    email = data.get("email", "").strip().lower()
+    name = data.get("name", "").strip()
+
+    if not google_id:
+        return jsonify({
+            "user": None,
+            "msg": "Google ID is missing"
+        }), 400
+
+    if not validate_email(email):
+        return jsonify({
+            "user": None,
+            "msg": "Invalid Google email"
+        }), 400
+
+    if not name:
+        name = email.split("@")[0]
+
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+
+        # 1. هل Google مربوط مسبقاً بحساب؟
+        c.execute(
+            "SELECT * FROM students WHERE google_id=%s",
+            (google_id,)
+        )
+
+        user = c.fetchone()
+
+        if user:
+            conn.close()
+
+            return jsonify({
+                "user": list(user),
+                "google_id": google_id,
+                "msg": ""
+            })
+
+        # 2. هل البريد موجود بحساب Asadex قديم؟
+        c.execute(
+            "SELECT * FROM students WHERE email=%s",
+            (email,)
+        )
+
+        user = c.fetchone()
+
+        if user:
+            user_id = user[0]
+
+            c.execute(
+                """
+                UPDATE students
+                SET google_id=%s
+                WHERE id=%s
+                """,
+                (google_id, user_id)
+            )
+
+            conn.commit()
+
+            c.execute(
+                "SELECT * FROM students WHERE id=%s",
+                (user_id,)
+            )
+
+            user = c.fetchone()
+            conn.close()
+
+            return jsonify({
+                "user": list(user),
+                "google_id": google_id,
+                "msg": ""
+            })
+
+        # 3. إنشاء حساب جديد
+        random_password = os.urandom(32).hex()
+
+        c.execute(
+            """
+            INSERT INTO students
+            (email, password, name, google_id)
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+            """,
+            (
+                email,
+                hash_password(random_password),
+                name,
+                google_id
+            )
+        )
+
+        user = c.fetchone()
+
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "user": list(user),
+            "google_id": google_id,
+            "msg": ""
+        })
+
+    except Exception as e:
+        return jsonify({
+            "user": None,
+            "msg": str(e)
+        }), 500
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json
