@@ -29,6 +29,7 @@ def google_login():
 def google_callback():
     try:
         token = google.authorize_access_token()
+
         user_info = token.get("userinfo")
 
         if not user_info:
@@ -39,7 +40,10 @@ def google_callback():
         name = user_info.get("name", "").strip()
 
         if not google_id or not email:
-            return "Google account information is incomplete.", 400
+            return jsonify({
+                "ok": False,
+                "msg": "Google account information is incomplete."
+            }), 400
 
         if not name:
             name = email.split("@")[0]
@@ -47,24 +51,99 @@ def google_callback():
         conn = get_conn()
         c = conn.cursor()
 
+        # ====================================================
+        # 1. البحث عن حساب مرتبط بهذا Google ID
+        # ====================================================
+
+        c.execute(
+            "SELECT * FROM students WHERE google_id=%s",
+            (google_id,)
+        )
+
+        user = c.fetchone()
+
+        if user:
+            conn.commit()
+            conn.close()
+
+            return jsonify({
+                "ok": True,
+                "user": list(user),
+                "google_id": google_id,
+                "msg": "Google login successful"
+            })
+
+        # ====================================================
+        # 2. لم نجد Google ID
+        #    نبحث عن حساب بنفس البريد الإلكتروني
+        # ====================================================
+
         c.execute(
             "SELECT * FROM students WHERE email=%s",
             (email,)
         )
+
         user = c.fetchone()
 
-        if not user:
-            random_password = os.urandom(32).hex()
+        if user:
+            # -----------------------------------------------
+            # الحساب موجود مسبقاً
+            # نربط حساب Google بالحساب الموجود
+            # -----------------------------------------------
+
+            user_id = user[0]
 
             c.execute(
                 """
-                INSERT INTO students (email, password, name)
-                VALUES (%s, %s, %s)
-                RETURNING *
+                UPDATE students
+                SET google_id=%s
+                WHERE id=%s
                 """,
-                (email, hash_password(random_password), name)
+                (google_id, user_id)
             )
+
+            conn.commit()
+
+            # نقرأ الحساب بعد التحديث
+            c.execute(
+                "SELECT * FROM students WHERE id=%s",
+                (user_id,)
+            )
+
             user = c.fetchone()
+
+            conn.close()
+
+            return jsonify({
+                "ok": True,
+                "user": list(user),
+                "google_id": google_id,
+                "msg": "Google account linked to existing account"
+            })
+
+        # ====================================================
+        # 3. لا يوجد حساب
+        #    إنشاء حساب Asadex جديد
+        # ====================================================
+
+        random_password = os.urandom(32).hex()
+
+        c.execute(
+            """
+            INSERT INTO students
+            (email, password, name, google_id)
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+            """,
+            (
+                email,
+                hash_password(random_password),
+                name,
+                google_id
+            )
+        )
+
+        user = c.fetchone()
 
         conn.commit()
         conn.close()
@@ -73,17 +152,17 @@ def google_callback():
             "ok": True,
             "user": list(user),
             "google_id": google_id,
-            "msg": "Google login successful"
+            "msg": "Google account created successfully"
         })
 
     except Exception as e:
+
+        print("Google callback error:", e)
+
         return jsonify({
             "ok": False,
             "msg": str(e)
         }), 500
-
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
 # ==== Added: daily limit settings ====
 DAILY_LIMIT = 23  # allowed questions per day (text + images)
 
