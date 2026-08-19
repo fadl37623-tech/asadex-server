@@ -106,8 +106,22 @@ def init_db():
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
-            name TEXT NOT NULL
+            name TEXT NOT NULL,
+            google_id TEXT
         )''')
+
+        # إضافة google_id للمستخدمين القدامى إذا كان الجدول موجوداً مسبقاً
+        c.execute("""
+            ALTER TABLE students
+            ADD COLUMN IF NOT EXISTS google_id TEXT
+        """)
+
+        # منع ربط نفس حساب Google بأكثر من حساب Asadex
+        c.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS students_google_id_unique
+            ON students (google_id)
+            WHERE google_id IS NOT NULL
+        """)
         c.execute('''CREATE TABLE IF NOT EXISTS questions (
             id SERIAL PRIMARY KEY,
             user_id INTEGER,
