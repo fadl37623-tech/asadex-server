@@ -7,7 +7,7 @@ import os
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32))
-
+DATABASE_URL = os.environ.get("DATABASE_URL")
 oauth = OAuth(app)
 
 google = oauth.register(
