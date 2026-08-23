@@ -1266,7 +1266,29 @@ def submit_feedback():
             "msg": str(e)
         }), 500
 
+# ============================================================
+# Android Google OAuth callback
+# ============================================================
 
+@app.route(
+    "/oauth_callback",
+    methods=["GET"]
+)
+def android_oauth_callback():
+
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Asadex Google Login</title>
+    </head>
+    <body>
+        <h3>Google login is processing...</h3>
+        <p>You can return to the Asadex app.</p>
+    </body>
+    </html>
+    """
 # ============================================================
 # Health check
 # ============================================================
