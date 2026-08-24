@@ -4,6 +4,7 @@ import psycopg2
 import hashlib
 import re
 import os
+import httpx
 
 # ============================================================
 # Flask
@@ -139,10 +140,6 @@ def google_callback():
             .strip()
         )
 
-        # ----------------------------------------------------
-        # Validate Google data
-        # ----------------------------------------------------
-
         if not google_id:
 
             return jsonify({
@@ -161,16 +158,8 @@ def google_callback():
 
             name = email.split("@")[0]
 
-        # ----------------------------------------------------
-        # Database
-        # ----------------------------------------------------
-
         conn = get_conn()
         c = conn.cursor()
-
-        # ----------------------------------------------------
-        # 1. Search by Google ID
-        # ----------------------------------------------------
 
         c.execute(
             """
@@ -193,10 +182,6 @@ def google_callback():
                 "msg": "Google login successful"
             })
 
-        # ----------------------------------------------------
-        # 2. Search by email
-        # ----------------------------------------------------
-
         c.execute(
             """
             SELECT *
@@ -211,11 +196,6 @@ def google_callback():
         if user:
 
             user_id = user[0]
-
-            # -----------------------------------------------
-            # Link Google to existing account
-            # -----------------------------------------------
-
             c.execute(
                 """
                 UPDATE students
@@ -252,10 +232,6 @@ def google_callback():
                     "to existing account"
                 )
             })
-
-        # ----------------------------------------------------
-        # 3. Create new Asadex account
-        # ----------------------------------------------------
 
         random_password = os.urandom(
             32
@@ -347,10 +323,6 @@ def google_login_api():
         .strip()
     )
 
-    # --------------------------------------------------------
-    # Validation
-    # --------------------------------------------------------
-
     if not google_id:
 
         return jsonify({
@@ -374,9 +346,6 @@ def google_login_api():
         conn = get_conn()
         c = conn.cursor()
 
-        # ----------------------------------------------------
-        # 1. Existing Google account
-        # ----------------------------------------------------
         c.execute(
             """
             SELECT *
@@ -397,10 +366,6 @@ def google_login_api():
                 "google_id": google_id,
                 "msg": ""
             })
-
-        # ----------------------------------------------------
-        # 2. Existing email account
-        # ----------------------------------------------------
 
         c.execute(
             """
@@ -443,16 +408,11 @@ def google_login_api():
             user = c.fetchone()
 
             conn.close()
-
             return jsonify({
                 "user": list(user),
                 "google_id": google_id,
                 "msg": ""
             })
-
-        # ----------------------------------------------------
-        # 3. Create new account
-        # ----------------------------------------------------
 
         random_password = os.urandom(
             32
@@ -505,6 +465,198 @@ def google_login_api():
 
 
 # ============================================================
+# Mobile Google OAuth - Exchange code for token (Android/iOS)
+#
+# يُستخدم من تطبيق Flet (Android/iOS) بدل تبادل الكود مباشرة
+# مع جوجل، حتى لا يحتوي التطبيق على GOOGLE_CLIENT_SECRET.
+# السر يبقى محفوظاً هنا فقط كمتغير بيئة على السيرفر.
+# ============================================================
+
+
+def upsert_google_user(google_id, email, name):
+    """
+    نفس منطق البحث/الربط/الإنشاء المستخدم بـ /google-login
+    """
+
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute(
+        """
+        SELECT *
+        FROM students
+        WHERE google_id=%s
+        """,
+        (google_id,)
+    )
+
+    user = c.fetchone()
+
+    if user:
+        conn.close()
+        return list(user)
+
+    c.execute(
+        """
+        SELECT *
+        FROM students
+        WHERE email=%s
+        """,
+        (email,)
+    )
+
+    user = c.fetchone()
+
+    if user:
+        user_id = user[0]
+
+        c.execute(
+            """
+            UPDATE students
+            SET google_id=%s
+            WHERE id=%s
+            """,
+            (google_id, user_id)
+        )
+
+        conn.commit()
+
+        c.execute(
+            """
+            SELECT *
+            FROM students
+            WHERE id=%s
+            """,
+            (user_id,)
+        )
+
+        user = c.fetchone()
+        conn.close()
+        return list(user)
+
+    random_password = os.urandom(32).hex()
+
+    c.execute(
+        """
+        INSERT INTO students
+        (email, password, name, google_id)
+        VALUES (%s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            email,
+            hash_password(random_password),
+            name,
+            google_id
+        )
+    )
+
+    user = c.fetchone()
+    conn.commit()
+    conn.close()
+
+    return list(user)
+
+
+@app.route(
+    "/google/mobile-exchange",
+    methods=["POST"]
+)
+def google_mobile_exchange():
+
+    data = request.json or {}
+
+    code = data.get("code")
+    code_verifier = data.get("code_verifier")
+    redirect_uri = data.get("redirect_uri")
+
+    if not code or not code_verifier or not redirect_uri:
+
+        return jsonify({
+            "ok": False,
+            "msg": "Missing code, code_verifier or redirect_uri"
+        }), 400
+
+    try:
+
+        token_response = httpx.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": os.environ.get("GOOGLE_CLIENT_ID"),
+                "client_secret": os.environ.get("GOOGLE_CLIENT_SECRET"),
+                "code": code,
+                "code_verifier": code_verifier,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+            timeout=20
+        )
+
+        if token_response.status_code != 200:
+
+            print(
+                "Mobile token exchange failed:",
+                token_response.text
+            )
+            return jsonify({
+                "ok": False,
+                "msg": f"Token exchange failed: {token_response.text}"
+            }), 400
+
+        token_data = token_response.json()
+        access_token = token_data.get("access_token")
+
+        if not access_token:
+
+            return jsonify({
+                "ok": False,
+                "msg": "Google did not return access_token."
+            }), 400
+
+        userinfo_response = httpx.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20
+        )
+
+        userinfo_response.raise_for_status()
+
+        user_info = userinfo_response.json()
+
+        google_id = str(user_info.get("sub", "")).strip()
+        email = user_info.get("email", "").strip().lower()
+        name = user_info.get("name", "").strip()
+
+        if not google_id or not validate_email(email):
+
+            return jsonify({
+                "ok": False,
+                "msg": "Invalid Google account data"
+            }), 400
+
+        if not name:
+            name = email.split("@")[0]
+
+        user = upsert_google_user(google_id, email, name)
+
+        return jsonify({
+            "ok": True,
+            "user": user,
+            "google_id": google_id,
+            "msg": ""
+        })
+
+    except Exception as e:
+
+        print("Mobile Google exchange error:", e)
+
+        return jsonify({
+            "ok": False,
+            "msg": str(e)
+        }), 500
+
+
+# ============================================================
 # Initialize database
 # ============================================================
 
@@ -520,10 +672,6 @@ def init_db():
         conn = get_conn()
         c = conn.cursor()
 
-        # ----------------------------------------------------
-        # Students
-        # ----------------------------------------------------
-
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS students (
@@ -536,7 +684,6 @@ def init_db():
             """
         )
 
-        # Existing installations
         c.execute(
             """
             ALTER TABLE students
@@ -544,7 +691,6 @@ def init_db():
             """
         )
 
-        # Unique Google ID
         c.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS
@@ -554,9 +700,6 @@ def init_db():
             """
         )
 
-        # ----------------------------------------------------
-        # Questions
-        # ----------------------------------------------------
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS questions (
@@ -569,10 +712,6 @@ def init_db():
             """
         )
 
-        # ----------------------------------------------------
-        # Daily usage
-        # ----------------------------------------------------
-
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_limits (
@@ -583,10 +722,6 @@ def init_db():
             )
             """
         )
-
-        # ----------------------------------------------------
-        # Feedback
-        # ----------------------------------------------------
 
         c.execute(
             """
@@ -642,7 +777,6 @@ def register():
         .strip()
         .lower()
     )
-
     password = data.get(
         "password",
         ""
@@ -876,7 +1010,6 @@ def check_limit(user_id):
     import datetime
 
     try:
-
         conn = get_conn()
         c = conn.cursor()
 
@@ -894,10 +1027,6 @@ def check_limit(user_id):
         )
 
         row = c.fetchone()
-
-        # ----------------------------------------------------
-        # First question
-        # ----------------------------------------------------
 
         if row is None:
 
@@ -938,10 +1067,6 @@ def check_limit(user_id):
             now - last_reset_time
         )
 
-        # ----------------------------------------------------
-        # New 24-hour cycle
-        # ----------------------------------------------------
-
         if time_passed >= datetime.timedelta(
             hours=24
         ):
@@ -975,10 +1100,6 @@ def check_limit(user_id):
                 )
             })
 
-        # ----------------------------------------------------
-        # Still has questions
-        # ----------------------------------------------------
-
         if solve_count < DAILY_LIMIT:
 
             c.execute(
@@ -1008,10 +1129,6 @@ def check_limit(user_id):
                     "left today."
                 )
             })
-
-        # ----------------------------------------------------
-        # Limit reached
-        # ----------------------------------------------------
 
         conn.close()
 
@@ -1073,7 +1190,6 @@ def save_question():
 
         conn = get_conn()
         c = conn.cursor()
-
         c.execute(
             """
             INSERT INTO questions
@@ -1154,6 +1270,8 @@ def get_questions(user_id):
             "questions": [],
             "msg": str(e)
         })
+
+
 # ============================================================
 # Feedback
 # ============================================================
@@ -1265,6 +1383,7 @@ def submit_feedback():
             "ok": False,
             "msg": str(e)
         }), 500
+
 
 # ============================================================
 # Android Google OAuth callback
