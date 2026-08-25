@@ -586,6 +586,7 @@ def google_mobile_exchange():
             "https://oauth2.googleapis.com/token",
             data={
                 "client_id": GOOGLE_ANDROID_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
                 "code": code,
                 "code_verifier": code_verifier,
                 "redirect_uri": redirect_uri,
