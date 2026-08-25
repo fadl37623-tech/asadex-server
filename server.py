@@ -19,6 +19,9 @@ app.secret_key = os.environ.get(
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+GOOGLE_ANDROID_CLIENT_ID = os.environ.get(
+    "GOOGLE_ANDROID_CLIENT_ID"
+)
 # ============================================================
 # Google OAuth
 # ============================================================
@@ -582,8 +585,7 @@ def google_mobile_exchange():
         token_response = httpx.post(
             "https://oauth2.googleapis.com/token",
             data={
-                "client_id": os.environ.get("GOOGLE_CLIENT_ID"),
-                "client_secret": os.environ.get("GOOGLE_CLIENT_SECRET"),
+                "client_id": GOOGLE_ANDROID_CLIENT_ID,
                 "code": code,
                 "code_verifier": code_verifier,
                 "redirect_uri": redirect_uri,
@@ -591,7 +593,6 @@ def google_mobile_exchange():
             },
             timeout=20
         )
-
         if token_response.status_code != 200:
 
             print(
