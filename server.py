@@ -22,7 +22,18 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 GOOGLE_ANDROID_CLIENT_ID = os.environ.get(
     "GOOGLE_ANDROID_CLIENT_ID"
 )
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
+
+GOOGLE_ANDROID_CLIENT_SECRET = os.environ.get(
+    "GOOGLE_ANDROID_CLIENT_SECRET"
+)
+
+GOOGLE_CLIENT_ID = os.environ.get(
+    "GOOGLE_CLIENT_ID"
+)
+
+GOOGLE_CLIENT_SECRET = os.environ.get(
+    "GOOGLE_CLIENT_SECRET"
+)
 # ============================================================
 # Google OAuth
 # ============================================================
@@ -587,7 +598,7 @@ def google_mobile_exchange():
             "https://oauth2.googleapis.com/token",
             data={
                 "client_id": GOOGLE_ANDROID_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
+                "client_secret": GOOGLE_ANDROID_CLIENT_SECRET,
                 "code": code,
                 "code_verifier": code_verifier,
                 "redirect_uri": redirect_uri,
