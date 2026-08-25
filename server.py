@@ -22,6 +22,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 GOOGLE_ANDROID_CLIENT_ID = os.environ.get(
     "GOOGLE_ANDROID_CLIENT_ID"
 )
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
 # ============================================================
 # Google OAuth
 # ============================================================
