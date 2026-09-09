@@ -749,7 +749,19 @@ def init_db():
             )
             """
         )
-
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_limits_v2 (
+                user_id INTEGER PRIMARY KEY,
+                heavy_count INTEGER NOT NULL DEFAULT 0,
+                heavy_locked_until TIMESTAMP,
+                image_convert_count INTEGER NOT NULL DEFAULT 0,
+                drawing_count INTEGER NOT NULL DEFAULT 0,
+                similar_challenge_count INTEGER NOT NULL DEFAULT 0,
+                daily_reset_time TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -1438,10 +1450,230 @@ def home():
         "service": "Asadex Server"
     })
 
+# ============================================================
+# ضيفهن لملف السيرفر (app.py) - مو ملف منفصل، هذا فقط للمراجعة
+# ============================================================
+
+import datetime
+
+# ─── إعدادات نظام النقاط الجديد ───────────────────────────────
+HEAVY_LIMIT = 3            # نص/تقرير/صورة/ملف/لقطة شاشة - مجتمعين
+HEAVY_LOCK_HOURS = 10       # مدة القفل الكامل بعد الوصول للحد
+
+FEATURE_LIMITS = {
+    "image_convert": 2,     # تحويل الجواب إلى صورة
+    "drawing": 2,            # الرسم
+    "similar_challenge": 3,  # Similar + Challenge me مجتمعين
+}
+
+DAILY_RESET_HOURS = 24
+
 
 # ============================================================
-# Run
+# الحد "الثقيل" المشترك (3 طلبات -> قفل التطبيق كامل 10 ساعات)
 # ============================================================
+
+@app.route("/check_heavy_limit/<int:user_id>", methods=["POST"])
+def check_heavy_limit(user_id):
+
+    data = request.json or {}
+    action_type = data.get("type", "unknown")  # للـ logging فقط
+
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        now = datetime.datetime.now()
+
+        c.execute(
+            """
+            SELECT heavy_count, heavy_locked_until, daily_reset_time
+            FROM usage_limits_v2
+            WHERE user_id=%s
+            """,
+            (user_id,)
+        )
+        row = c.fetchone()
+
+        # ─── مستخدم جديد بالجدول ───
+        if row is None:
+            c.execute(
+                """
+                INSERT INTO usage_limits_v2
+                (user_id, heavy_count, daily_reset_time)
+                VALUES (%s, 1, %s)
+                """,
+                (user_id, now)
+            )
+            conn.commit()
+            conn.close()
+            return jsonify({
+                "allowed": True,
+                "remaining": HEAVY_LIMIT - 1,
+                "msg": f"You have {HEAVY_LIMIT - 1} requests left before a 10-hour lock."
+            })
+
+        heavy_count, heavy_locked_until, daily_reset_time = row
+
+        # ─── لسا مقفول من قبل؟ ───
+        if heavy_locked_until is not None and now < heavy_locked_until:
+            conn.close()
+            remaining_time = heavy_locked_until - now
+            hours, rem = divmod(int(remaining_time.total_seconds()), 3600)
+            minutes = rem // 60
+            return jsonify({
+                "allowed": False,
+                "remaining": 0,
+                "msg": f"App is locked. Try again in {hours}h {minutes}m."
+            })
+
+        # ─── القفل انتهى مدته -> يصفّر ───
+        if heavy_locked_until is not None and now >= heavy_locked_until:
+            heavy_count = 0
+            heavy_locked_until = None
+
+        # ─── إعادة تصفير يومية عامة (24 ساعة من أول استخدام) ───
+        if now - daily_reset_time >= datetime.timedelta(hours=DAILY_RESET_HOURS):
+            heavy_count = 0
+            daily_reset_time = now
+
+        new_count = heavy_count + 1
+
+        # ─── هذا الطلب يوصّل للحد -> يُسمح به، ويُقفل بعده ───
+        if new_count >= HEAVY_LIMIT:
+            lock_until = now + datetime.timedelta(hours=HEAVY_LOCK_HOURS)
+            c.execute(
+                """
+                UPDATE usage_limits_v2
+                SET heavy_count=%s, heavy_locked_until=%s, daily_reset_time=%s
+                WHERE user_id=%s
+                """,
+                (new_count, lock_until, daily_reset_time, user_id)
+            )
+            conn.commit()
+            conn.close()
+            return jsonify({
+                "allowed": True,
+                "remaining": 0,
+                "msg": f"This was your last request. App will lock for {HEAVY_LOCK_HOURS} hours."
+            })
+
+        # ─── طلب عادي، لسا ضمن الحد ───
+        c.execute(
+            """
+            UPDATE usage_limits_v2
+            SET heavy_count=%s, heavy_locked_until=NULL, daily_reset_time=%s
+            WHERE user_id=%s
+            """,
+            (new_count, daily_reset_time, user_id)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({
+            "allowed": True,
+            "remaining": HEAVY_LIMIT - new_count,
+            "msg": f"You have {HEAVY_LIMIT - new_count} requests left before a 10-hour lock."
+        })
+
+    except Exception as e:
+        return jsonify({"allowed": False, "remaining": 0, "msg": str(e)}), 500
+
+
+# ============================================================
+# الحصص المنفصلة (تحويل لصورة / رسم / Similar+Challenge)
+# ============================================================
+
+@app.route("/check_feature_limit/<int:user_id>", methods=["POST"])
+def check_feature_limit(user_id):
+
+    data = request.json or {}
+    feature = data.get("feature", "")
+
+    if feature not in FEATURE_LIMITS:
+        return jsonify({
+            "allowed": False,
+            "remaining": 0,
+            "msg": f"Unknown feature: {feature}"
+        }), 400
+
+    column_map = {
+        "image_convert": "image_convert_count",
+        "drawing": "drawing_count",
+        "similar_challenge": "similar_challenge_count",
+    }
+    column = column_map[feature]
+    limit = FEATURE_LIMITS[feature]
+
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        now = datetime.datetime.now()
+
+        c.execute(
+            f"""
+            SELECT {column}, daily_reset_time
+            FROM usage_limits_v2
+            WHERE user_id=%s
+            """,
+            (user_id,)
+        )
+        row = c.fetchone()
+
+        if row is None:
+            c.execute(
+                f"""
+                INSERT INTO usage_limits_v2
+                (user_id, {column}, daily_reset_time)
+                VALUES (%s, 1, %s)
+                """,
+                (user_id, now)
+            )
+            conn.commit()
+            conn.close()
+            return jsonify({
+                "allowed": True,
+                "remaining": limit - 1,
+                "msg": f"{limit - 1} left today for this feature."
+            })
+
+        count, daily_reset_time = row
+
+        # ─── تصفير يومي (24 ساعة) ───
+        if now - daily_reset_time >= datetime.timedelta(hours=DAILY_RESET_HOURS):
+            count = 0
+            daily_reset_time = now
+
+        if count >= limit:
+            conn.close()
+            time_left = datetime.timedelta(hours=DAILY_RESET_HOURS) - (now - daily_reset_time)
+            hours, rem = divmod(int(time_left.total_seconds()), 3600)
+            minutes = rem // 60
+            return jsonify({
+                "allowed": False,
+                "remaining": 0,
+                "msg": f"Daily limit reached for this feature. Resets in {hours}h {minutes}m."
+            })
+
+        new_count = count + 1
+
+        c.execute(
+            f"""
+            UPDATE usage_limits_v2
+            SET {column}=%s, daily_reset_time=%s
+            WHERE user_id=%s
+            """,
+            (new_count, daily_reset_time, user_id)
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "allowed": True,
+            "remaining": limit - new_count,
+            "msg": f"{limit - new_count} left today for this feature."
+        })
+
+    except Exception as e:
+        return jsonify({"allowed": False, "remaining": 0, "msg": str(e)}), 500
 
 if __name__ == "__main__":
 
