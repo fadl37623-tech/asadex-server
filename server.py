@@ -1478,7 +1478,7 @@ def check_heavy_limit(user_id):
 
     data = request.json or {}
     action_type = data.get("type", "unknown")  # للـ logging فقط
-
+    weight = int(data.get("weight", 1))
     try:
         conn = get_conn()
         c = conn.cursor()
@@ -1536,7 +1536,7 @@ def check_heavy_limit(user_id):
             heavy_count = 0
             daily_reset_time = now
 
-        new_count = heavy_count + 1
+        new_count = heavy_count + weight
 
         # ─── هذا الطلب يوصّل للحد -> يُسمح به، ويُقفل بعده ───
         if new_count >= HEAVY_LIMIT:
