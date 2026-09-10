@@ -762,6 +762,18 @@ def init_db():
             )
             """
         )
+        c.execute(
+            """
+            ALTER TABLE usage_limits_v2
+            ADD COLUMN IF NOT EXISTS grace_text_count INTEGER NOT NULL DEFAULT 0
+            """
+        )
+        c.execute(
+            """
+            ALTER TABLE usage_limits_v2
+            ADD COLUMN IF NOT EXISTS grace_feature_used BOOLEAN NOT NULL DEFAULT FALSE
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -1577,7 +1589,28 @@ def check_heavy_limit(user_id):
     except Exception as e:
         return jsonify({"allowed": False, "remaining": 0, "msg": str(e)}), 500
 
-
+@app.route("/debug_reset_limit/<int:user_id>", methods=["POST", "GET"])
+def debug_reset_limit(user_id):
+    secret = request.args.get("key", "")
+    if secret != os.environ.get("DEBUG_RESET_KEY", "change-me-please"):
+        return jsonify({"ok": False, "msg": "Unauthorized"}), 403
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute(
+            """
+            UPDATE usage_limits_v2
+            SET heavy_count=0, heavy_locked_until=NULL,
+                grace_text_count=0, grace_feature_used=FALSE
+            WHERE user_id=%s
+            """,
+            (user_id,)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "msg": "Limit reset."})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
 # ============================================================
 # الحصص المنفصلة (تحويل لصورة / رسم / Similar+Challenge)
 # ============================================================
