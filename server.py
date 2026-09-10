@@ -1707,7 +1707,144 @@ def check_feature_limit(user_id):
 
     except Exception as e:
         return jsonify({"allowed": False, "remaining": 0, "msg": str(e)}), 500
+# ============================================================
 
+GRACE_TEXT_LIMIT = 3
+# ============================================================
+# أسئلة نصية بالوضع الحر (3 فقط، تشتغل فقط أثناء القفل)
+# ============================================================
+
+@app.route("/check_grace_text/<int:user_id>", methods=["POST"])
+def check_grace_text(user_id):
+
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        now = datetime.datetime.now()
+
+        c.execute(
+            """
+            SELECT heavy_locked_until, grace_text_count
+            FROM usage_limits_v2
+            WHERE user_id=%s
+            """,
+            (user_id,)
+        )
+        row = c.fetchone()
+
+        if row is None:
+            conn.close()
+            return jsonify({
+                "allowed": False,
+                "remaining": 0,
+                "msg": "No lock record found."
+            }), 400
+
+        heavy_locked_until, grace_text_count = row
+
+        # ─── الوضع الحر يشتغل فقط أثناء القفل الفعلي ───
+        if heavy_locked_until is None or now >= heavy_locked_until:
+            conn.close()
+            return jsonify({
+                "allowed": False,
+                "remaining": 0,
+                "msg": "App is not locked, use the normal flow."
+            }), 400
+
+        if grace_text_count >= GRACE_TEXT_LIMIT:
+            conn.close()
+            return jsonify({
+                "allowed": False,
+                "remaining": 0,
+                "msg": "You've used all 3 questions in the new chat. Wait for the lock to end."
+            })
+
+        new_count = grace_text_count + 1
+
+        c.execute(
+            """
+            UPDATE usage_limits_v2
+            SET grace_text_count=%s
+            WHERE user_id=%s
+            """,
+            (new_count, user_id)
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "allowed": True,
+            "remaining": GRACE_TEXT_LIMIT - new_count,
+            "msg": f"{GRACE_TEXT_LIMIT - new_count} questions left in this chat."
+        })
+
+    except Exception as e:
+        return jsonify({"allowed": False, "remaining": 0, "msg": str(e)}), 500
+
+
+# ============================================================
+# ميزة واحدة مشتركة بالوضع الحر (تحويل لصورة أو رسم - أيّهما أولاً)
+# ============================================================
+
+@app.route("/check_grace_feature/<int:user_id>", methods=["POST"])
+def check_grace_feature(user_id):
+
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        now = datetime.datetime.now()
+
+        c.execute(
+            """
+            SELECT heavy_locked_until, grace_feature_used
+            FROM usage_limits_v2
+            WHERE user_id=%s
+            """,
+            (user_id,)
+        )
+        row = c.fetchone()
+
+        if row is None:
+            conn.close()
+            return jsonify({
+                "allowed": False,
+                "msg": "No lock record found."
+            }), 400
+
+        heavy_locked_until, grace_feature_used = row
+
+        if heavy_locked_until is None or now >= heavy_locked_until:
+            conn.close()
+            return jsonify({
+                "allowed": False,
+                "msg": "App is not locked, use the normal flow."
+            }), 400
+
+        if grace_feature_used:
+            conn.close()
+            return jsonify({
+                "allowed": False,
+                "msg": "You've already used your one feature in this chat."
+            })
+
+        c.execute(
+            """
+            UPDATE usage_limits_v2
+            SET grace_feature_used=TRUE
+            WHERE user_id=%s
+            """,
+            (user_id,)
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "allowed": True,
+            "msg": "This was your one allowed feature use in this chat."
+        })
+
+    except Exception as e:
+        return jsonify({"allowed": False, "msg": str(e)}), 500
 if __name__ == "__main__":
 
     port = int(
