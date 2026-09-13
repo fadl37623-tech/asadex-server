@@ -78,7 +78,753 @@ def hash_password(password):
         password.encode()
     ).hexdigest()
 
+# ============================================================
+# AI CACHE + ANALYTICS + FEEDBACK SYSTEM
+# ============================================================
 
+import time
+import unicodedata
+
+
+# ------------------------------------------------------------
+# Cache settings
+# ------------------------------------------------------------
+
+CACHE_VERSION = "v1"
+CACHE_MODEL = "gemini-2.5-flash"
+CACHE_TTL_DAYS = 30
+
+
+def normalize_cache_text(text):
+    """
+    توحيد السؤال حتى نستطيع اكتشاف الأسئلة المتطابقة
+    حتى لو اختلفت المسافات أو شكل بعض الأحرف.
+    """
+    if not text:
+        return ""
+
+    text = unicodedata.normalize(
+        "NFKC",
+        str(text)
+    )
+
+    text = " ".join(
+        text.strip().lower().split()
+    )
+
+    return text
+
+
+def make_cache_key(
+    question,
+    subject="",
+    language="",
+    concise=True
+):
+    """
+    إنشاء مفتاح ثابت للسؤال.
+    """
+    normalized_question = normalize_cache_text(
+        question
+    )
+
+    raw = (
+        f"{CACHE_VERSION}|"
+        f"{CACHE_MODEL}|"
+        f"{subject}|"
+        f"{language}|"
+        f"{concise}|"
+        f"{normalized_question}"
+    )
+
+    return hashlib.sha256(
+        raw.encode("utf-8")
+    ).hexdigest()
+
+
+def make_question_hash(question):
+    """
+    Hash للسؤال من أجل Analytics.
+    لا نخزن السؤال نفسه داخل Analytics.
+    """
+    normalized = normalize_cache_text(
+        question
+    )
+
+    return hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()
+
+
+# ============================================================
+# Initialize AI system tables
+# ============================================================
+
+def init_ai_system_tables():
+
+    conn = None
+
+    try:
+
+        conn = get_conn()
+        c = conn.cursor()
+
+        # ----------------------------------------------------
+        # AI Cache
+        # ----------------------------------------------------
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_cache (
+                id SERIAL PRIMARY KEY,
+
+                cache_key TEXT UNIQUE NOT NULL,
+
+                question TEXT NOT NULL,
+
+                answer TEXT NOT NULL,
+
+                subject TEXT,
+
+                language TEXT,
+
+                model TEXT NOT NULL,
+
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+                last_used_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+                hit_count INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+
+        c.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            ai_cache_key_index
+            ON ai_cache(cache_key)
+            """
+        )
+
+        c.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            ai_cache_last_used_index
+            ON ai_cache(last_used_at)
+            """
+        )
+
+        # ----------------------------------------------------
+        # Analytics
+        # ----------------------------------------------------
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analytics_events (
+                id BIGSERIAL PRIMARY KEY,
+
+                user_id INTEGER,
+
+                event_type TEXT NOT NULL,
+
+                question_hash TEXT,
+
+                subject TEXT,
+
+                language TEXT,
+
+                cache_hit BOOLEAN NOT NULL DEFAULT FALSE,
+
+                response_time_ms DOUBLE PRECISION,
+
+                success BOOLEAN NOT NULL DEFAULT TRUE,
+
+                error_type TEXT,
+
+                metadata JSONB,
+
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+
+        c.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            analytics_event_type_index
+            ON analytics_events(event_type)
+            """
+        )
+
+        c.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            analytics_created_at_index
+            ON analytics_events(created_at)
+            """
+        )
+        c.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            analytics_user_index
+            ON analytics_events(user_id)
+            """
+        )
+
+        # ----------------------------------------------------
+        # Feedback additions
+        # ----------------------------------------------------
+
+        c.execute(
+            """
+            ALTER TABLE feedback
+            ADD COLUMN IF NOT EXISTS
+            question_hash TEXT
+            """
+        )
+
+        c.execute(
+            """
+            ALTER TABLE feedback
+            ADD COLUMN IF NOT EXISTS
+            answer_hash TEXT
+            """
+        )
+
+        c.execute(
+            """
+            ALTER TABLE feedback
+            ADD COLUMN IF NOT EXISTS
+            subject TEXT
+            """
+        )
+
+        c.execute(
+            """
+            ALTER TABLE feedback
+            ADD COLUMN IF NOT EXISTS
+            language TEXT
+            """
+        )
+
+        conn.commit()
+
+        print(
+            "AI system tables initialized successfully."
+        )
+
+        return True
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        print(
+            "AI system table initialization error:",
+            e
+        )
+
+        return False
+
+    finally:
+
+        if conn:
+            conn.close()
+
+
+# ============================================================
+# Cache lookup
+# ============================================================
+
+def get_cached_answer(
+    cache_key
+):
+
+    conn = None
+
+    try:
+
+        conn = get_conn()
+        c = conn.cursor()
+
+        c.execute(
+            """
+            SELECT
+                answer,
+                created_at,
+                hit_count
+            FROM ai_cache
+            WHERE cache_key=%s
+            """,
+            (cache_key,)
+        )
+
+        row = c.fetchone()
+
+        if not row:
+            return None
+
+        answer, created_at, hit_count = row
+
+        # ----------------------------------------------------
+        # Cache expiration
+        # ----------------------------------------------------
+
+        age_seconds = (
+            time.time()
+            - created_at.timestamp()
+        )
+
+        if age_seconds > (
+            CACHE_TTL_DAYS * 24 * 60 * 60
+        ):
+
+            c.execute(
+                """
+                DELETE FROM ai_cache
+                WHERE cache_key=%s
+                """,
+                (cache_key,)
+            )
+
+            conn.commit()
+
+            return None
+
+        # ----------------------------------------------------
+        # Update cache usage
+        # ----------------------------------------------------
+
+        c.execute(
+            """
+            UPDATE ai_cache
+            SET
+                last_used_at=NOW(),
+                hit_count=hit_count + 1
+            WHERE cache_key=%s
+            """,
+            (cache_key,)
+        )
+
+        conn.commit()
+
+        return answer
+
+    except Exception as e:
+
+        print(
+            "Cache lookup error:",
+            e
+        )
+
+        return None
+
+    finally:
+
+        if conn:
+            conn.close()
+
+
+# ============================================================
+# Save answer to Cache
+# ============================================================
+
+def save_cached_answer(
+    cache_key,
+    question,
+    answer,
+    subject="",
+    language="",
+):
+    conn = None
+
+    try:
+
+        conn = get_conn()
+        c = conn.cursor()
+
+        c.execute(
+            """
+            INSERT INTO ai_cache
+            (
+                cache_key,
+                question,
+                answer,
+                subject,
+                language,
+                model
+            )
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            ON CONFLICT (cache_key)
+            DO UPDATE SET
+                answer=EXCLUDED.answer,
+                subject=EXCLUDED.subject,
+                language=EXCLUDED.language,
+                model=EXCLUDED.model,
+                last_used_at=NOW()
+            """,
+            (
+                cache_key,
+                question,
+                answer,
+                subject,
+                language,
+                CACHE_MODEL
+            )
+        )
+
+        conn.commit()
+
+        return True
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        print(
+            "Cache save error:",
+            e
+        )
+
+        return False
+
+    finally:
+
+        if conn:
+            conn.close()
+
+
+# ============================================================
+# Analytics event
+# ============================================================
+
+def record_analytics(
+    event_type,
+    user_id=None,
+    question=None,
+    subject=None,
+    language=None,
+    cache_hit=False,
+    response_time_ms=None,
+    success=True,
+    error_type=None,
+    metadata=None,
+):
+
+    conn = None
+
+    try:
+
+        question_hash = (
+            make_question_hash(question)
+            if question
+            else None
+        )
+
+        conn = get_conn()
+        c = conn.cursor()
+
+        c.execute(
+            """
+            INSERT INTO analytics_events
+            (
+                user_id,
+                event_type,
+                question_hash,
+                subject,
+                language,
+                cache_hit,
+                response_time_ms,
+                success,
+                error_type,
+                metadata
+            )
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            """,
+            (
+                user_id,
+                event_type,
+                question_hash,
+                subject,
+                language,
+                cache_hit,
+                response_time_ms,
+                success,
+                error_type,
+                metadata
+            )
+        )
+
+        conn.commit()
+
+        return True
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        print(
+            "Analytics error:",
+            e
+        )
+
+        return False
+
+    finally:
+
+        if conn:
+            conn.close()
+
+
+# ============================================================
+# Cache / Analytics test endpoint
+# ============================================================
+
+@app.route(
+    "/ai/cache-test",
+    methods=["POST"]
+)
+def ai_cache_test():
+
+    data = request.json or {}
+
+    question = data.get(
+        "question",
+        ""
+    ).strip()
+
+    subject = data.get(
+        "subject",
+        ""
+    )
+
+    language = data.get(
+        "language",
+        "English"
+    )
+
+    if not question:
+
+        return jsonify({
+            "ok": False,
+            "msg": "Question is required."
+        }), 400
+
+    cache_key = make_cache_key(
+        question=question,
+        subject=subject,
+        language=language,
+        concise=True
+    )
+
+    cached = get_cached_answer(
+        cache_key
+    )
+
+    if cached:
+
+        record_analytics(
+            event_type="cache_hit",
+            question=question,
+            subject=subject,
+            language=language,
+            cache_hit=True,
+            success=True
+        )
+
+        return jsonify({
+            "ok": True,
+            "cache_hit": True,
+            "answer": cached
+        })
+
+    record_analytics(
+        event_type="cache_miss",
+        question=question,
+        subject=subject,
+        language=language,
+        cache_hit=False,
+        success=True
+    )
+    return jsonify({
+        "ok": True,
+        "cache_hit": False,
+        "cache_key": cache_key,
+        "msg": "No cached answer found."
+    })
+
+
+# ============================================================
+# Analytics summary
+# ============================================================
+
+@app.route(
+    "/analytics/summary",
+    methods=["GET"]
+)
+def analytics_summary():
+
+    conn = None
+
+    try:
+
+        conn = get_conn()
+        c = conn.cursor()
+
+        # Total questions
+        c.execute(
+            """
+            SELECT COUNT(*)
+            FROM analytics_events
+            WHERE event_type='question'
+            """
+        )
+
+        total_questions = c.fetchone()[0]
+
+        # Cache hits
+        c.execute(
+            """
+            SELECT COUNT(*)
+            FROM analytics_events
+            WHERE event_type='cache_hit'
+            """
+        )
+
+        cache_hits = c.fetchone()[0]
+
+        # Cache misses
+        c.execute(
+            """
+            SELECT COUNT(*)
+            FROM analytics_events
+            WHERE event_type='cache_miss'
+            """
+        )
+
+        cache_misses = c.fetchone()[0]
+
+        # API calls
+        c.execute(
+            """
+            SELECT COUNT(*)
+            FROM analytics_events
+            WHERE event_type='api_call'
+            """
+        )
+
+        api_calls = c.fetchone()[0]
+
+        # Average response time
+        c.execute(
+            """
+            SELECT AVG(response_time_ms)
+            FROM analytics_events
+            WHERE event_type='api_call'
+            AND success=TRUE
+            AND response_time_ms IS NOT NULL
+            """
+        )
+
+        avg_response = c.fetchone()[0]
+
+        # Feedback
+        c.execute(
+            """
+            SELECT
+                COUNT(*),
+                AVG(rating)
+            FROM feedback
+            """
+        )
+
+        feedback_count, average_rating = (
+            c.fetchone()
+        )
+
+        total_cache_checks = (
+            cache_hits + cache_misses
+        )
+
+        cache_hit_rate = (
+            (
+                cache_hits
+                / total_cache_checks
+            ) * 100
+            if total_cache_checks
+            else 0
+        )
+
+        return jsonify({
+            "ok": True,
+
+            "questions": total_questions,
+
+            "cache": {
+                "hits": cache_hits,
+                "misses": cache_misses,
+                "hit_rate_percent": round(
+                    cache_hit_rate,
+                    2
+                )
+            },
+
+            "api_calls": api_calls,
+
+            "average_response_time_ms": (
+                round(avg_response, 2)
+                if avg_response is not None
+                else 0
+            ),
+
+            "feedback": {
+                "count": feedback_count,
+                "average_rating": (
+                    round(
+                        float(average_rating),
+                        2
+                    )
+                    if average_rating is not None
+                    else 0
+                )
+            }
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "ok": False,
+            "msg": str(e)
+        }), 500
+
+    finally:
+
+        if conn:
+            conn.close()
 # ============================================================
 # Validation
 # ============================================================
@@ -776,6 +1522,9 @@ def init_db():
         )
         conn.commit()
         conn.close()
+
+        # تهيئة نظام Cache + Analytics + Feedback
+        init_ai_system_tables()
 
         return jsonify({
             "status": "ok"
