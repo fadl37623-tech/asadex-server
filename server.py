@@ -709,8 +709,6 @@ def ai_cache_save():
             answer=answer,
             subject=subject,
             language=language,
-            concise=concise,
-            question_hash=question_hash,
         )
 
         return jsonify({
