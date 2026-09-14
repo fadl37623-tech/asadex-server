@@ -677,7 +677,54 @@ def ai_cache_test():
         "msg": "No cached answer found."
     })
 
+@app.route("/ai/cache-save", methods=["POST"])
+def ai_cache_save():
+    try:
+        data = request.get_json(silent=True) or {}
 
+        question = str(data.get("question", "")).strip()
+        answer = str(data.get("answer", "")).strip()
+        subject = str(data.get("subject", "general")).strip()
+        language = str(data.get("language", "English")).strip()
+        concise = bool(data.get("concise", True))
+
+        if not question or not answer:
+            return jsonify({
+                "ok": False,
+                "error": "question and answer are required"
+            }), 400
+
+        cache_key = make_cache_key(
+            question=question,
+            subject=subject,
+            language=language,
+            concise=concise,
+        )
+
+        question_hash = make_question_hash(question)
+
+        save_cached_answer(
+            cache_key=cache_key,
+            question=question,
+            answer=answer,
+            subject=subject,
+            language=language,
+            concise=concise,
+            question_hash=question_hash,
+        )
+
+        return jsonify({
+            "ok": True,
+            "saved": True,
+            "cache_key": cache_key,
+        })
+
+    except Exception as e:
+        print("CACHE SAVE ERROR:", repr(e))
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
 # ============================================================
 # Analytics summary
 # ============================================================
