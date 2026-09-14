@@ -599,7 +599,53 @@ def record_analytics(
         if conn:
             conn.close()
 
+@app.route(
+    "/analytics/event",
+    methods=["POST"]
+)
+def analytics_event():
 
+    data = request.json or {}
+
+    event_type = data.get("event_type")
+
+    if not event_type:
+        return jsonify({
+            "ok": False,
+            "msg": "event_type is required"
+        }), 400
+
+    success = record_analytics(
+        event_type=event_type,
+        user_id=data.get("user_id"),
+        question=data.get("question"),
+        subject=data.get("subject"),
+        language=data.get("language"),
+        cache_hit=data.get("cache_hit", False),
+        response_time_ms=data.get(
+            "response_time_ms"
+        ),
+        success=data.get(
+            "success",
+            True
+        ),
+        error_type=data.get(
+            "error_type"
+        ),
+        metadata=data.get(
+            "metadata"
+        ),
+    )
+
+    if not success:
+        return jsonify({
+            "ok": False,
+            "msg": "Failed to record analytics"
+        }), 500
+
+    return jsonify({
+        "ok": True
+    })
 # ============================================================
 # Cache / Analytics test endpoint
 # ============================================================
