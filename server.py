@@ -37,6 +37,39 @@ GOOGLE_CLIENT_ID = os.environ.get(
 GOOGLE_CLIENT_SECRET = os.environ.get(
     "GOOGLE_CLIENT_SECRET"
 )
+@app.route("/ai/generate", methods=["POST"])
+def ai_generate():
+    try:
+        data = request.json or {}
+
+        prompt = data.get("prompt")
+        if not prompt:
+            return jsonify({
+                "ok": False,
+                "error": "prompt is required"
+            }), 400
+
+        from google import genai
+
+        client = genai.Client(api_key=GEMINI_API_KEY)
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+
+        return jsonify({
+            "ok": True,
+            "answer": response.text
+        })
+
+    except Exception as e:
+        print("AI GENERATE ERROR:", repr(e))
+
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
 # ============================================================
 # Google OAuth
 # ============================================================
