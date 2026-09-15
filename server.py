@@ -19,6 +19,9 @@ app.secret_key = os.environ.get(
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+print("GEMINI API KEY CONFIGURED:", bool(GEMINI_API_KEY))
+
 GOOGLE_ANDROID_CLIENT_ID = os.environ.get(
     "GOOGLE_ANDROID_CLIENT_ID"
 )
