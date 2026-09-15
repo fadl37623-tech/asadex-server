@@ -42,21 +42,54 @@ def ai_generate():
     try:
         data = request.json or {}
 
+        contents = data.get("contents")
         prompt = data.get("prompt")
-        if not prompt:
-            return jsonify({
-                "ok": False,
-                "error": "prompt is required"
-            }), 400
+        system_instruction = data.get("system_instruction")
+        thinking_budget = data.get("thinking_budget")
+
+        # دعم الطلب النصي البسيط
+        if contents is None:
+            if not prompt:
+                return jsonify({
+                    "ok": False,
+                    "error": "prompt is required"
+                }), 400
+
+            contents = prompt
 
         from google import genai
 
-        client = genai.Client(api_key=GEMINI_API_KEY)
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
+        client = genai.Client(
+            api_key=GEMINI_API_KEY
         )
+
+        config_kwargs = {}
+
+        if system_instruction:
+            config_kwargs["system_instruction"] = system_instruction
+
+        if thinking_budget is not None:
+            config_kwargs["thinking_config"] = (
+                genai.types.ThinkingConfig(
+                    thinking_budget=int(thinking_budget)
+                )
+            )
+
+        if config_kwargs:
+            config = genai.types.GenerateContentConfig(
+                **config_kwargs
+            )
+
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=contents,
+                config=config,
+            )
+        else:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=contents,
+            )
 
         return jsonify({
             "ok": True,
