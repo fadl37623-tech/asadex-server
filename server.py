@@ -36,7 +36,6 @@ GOOGLE_CLIENT_ID = os.environ.get(
 
 GOOGLE_CLIENT_SECRET = os.environ.get(
     "GOOGLE_CLIENT_SECRET"
-)
 @app.route("/ai/generate", methods=["POST"])
 def ai_generate():
     try:
@@ -46,6 +45,7 @@ def ai_generate():
         prompt = data.get("prompt")
         system_instruction = data.get("system_instruction")
         thinking_budget = data.get("thinking_budget")
+        google_search = data.get("google_search", False)
 
         # دعم الطلب النصي البسيط
         if contents is None:
@@ -58,6 +58,7 @@ def ai_generate():
             contents = prompt
 
         from google import genai
+        from google.genai import types
         import time
 
         client = genai.Client(
@@ -71,20 +72,31 @@ def ai_generate():
 
         if thinking_budget is not None:
             config_kwargs["thinking_config"] = (
-                genai.types.ThinkingConfig(
+                types.ThinkingConfig(
                     thinking_budget=int(thinking_budget)
                 )
             )
 
+        # --------------------------------------------------------
+        # Google Search Grounding
+        # --------------------------------------------------------
+
+        if google_search:
+            config_kwargs["tools"] = [
+                types.Tool(
+                    google_search=types.GoogleSearch()
+                )
+            ]
+
         if config_kwargs:
-            config = genai.types.GenerateContentConfig(
+            config = types.GenerateContentConfig(
                 **config_kwargs
             )
         else:
             config = None
 
         # --------------------------------------------------------
-        # Gemini request with retry for temporary 503 errors
+        # Gemini request with retry
         # --------------------------------------------------------
 
         max_attempts = 3
@@ -111,10 +123,99 @@ def ai_generate():
                     f"AI GENERATE SUCCESS ON ATTEMPT {attempt}"
                 )
 
-                return jsonify({
+                # ------------------------------------------------
+                # استخراج مصادر Google Search Grounding
+                # ------------------------------------------------
+
+                grounding_sources = []
+
+                if google_search:
+                    try:
+                        for candidate in (
+                            getattr(response, "candidates", None) or []
+                        ):
+                            grounding_metadata = getattr(
+                                candidate,
+                                "grounding_metadata",
+                                None
+                            )
+
+                            if not grounding_metadata:
+                                continue
+
+                            grounding_chunks = getattr(
+                                grounding_metadata,
+                                "grounding_chunks",
+                                None
+                            ) or []
+
+                            for chunk in grounding_chunks:
+                                web = getattr(
+                                    chunk,
+                                    "web",
+                                    None
+                                )
+
+                                if not web:
+                                    continue
+                                uri = getattr(
+                                    web,
+                                    "uri",
+                                    None
+                                )
+
+                                title = getattr(
+                                    web,
+                                    "title",
+                                    None
+                                )
+
+                                if uri:
+                                    grounding_sources.append({
+                                        "url": uri,
+                                        "title": title or ""
+                                    })
+
+                    except Exception as source_error:
+                        print(
+                            "GROUNDING SOURCE EXTRACTION ERROR:",
+                            repr(source_error)
+                        )
+
+                # إزالة المصادر المكررة
+                unique_sources = []
+                seen_urls = set()
+
+                for source in grounding_sources:
+                    url = source.get("url")
+
+                    if not url:
+                        continue
+
+                    if url in seen_urls:
+                        continue
+
+                    seen_urls.add(url)
+                    unique_sources.append(source)
+
+                # ------------------------------------------------
+                # Response
+                # ------------------------------------------------
+
+                result = {
                     "ok": True,
                     "answer": response.text
-                })
+                }
+
+                if google_search:
+                    result["grounding_sources"] = unique_sources
+
+                    print(
+                        "GROUNDING SOURCES FOUND:",
+                        len(unique_sources)
+                    )
+
+                return jsonify(result)
 
             except Exception as e:
                 error_text = str(e)
@@ -136,7 +237,7 @@ def ai_generate():
                     raise
 
                 if attempt < max_attempts:
-                    wait_seconds = 2 ** (attempt - 1)
+                    wait_seconds = 2 * (attempt - 1)
 
                     print(
                         f"AI GENERATE RETRYING IN "
@@ -154,6 +255,7 @@ def ai_generate():
             "ok": False,
             "error": str(e)
         }), 500
+          
 # ============================================================
 # Google OAuth
 # ============================================================
