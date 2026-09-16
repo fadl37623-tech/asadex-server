@@ -58,6 +58,7 @@ def ai_generate():
             contents = prompt
 
         from google import genai
+        import time
 
         client = genai.Client(
             api_key=GEMINI_API_KEY
@@ -79,22 +80,72 @@ def ai_generate():
             config = genai.types.GenerateContentConfig(
                 **config_kwargs
             )
-
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=contents,
-                config=config,
-            )
         else:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=contents,
-            )
+            config = None
 
-        return jsonify({
-            "ok": True,
-            "answer": response.text
-        })
+        # --------------------------------------------------------
+        # Gemini request with retry for temporary 503 errors
+        # --------------------------------------------------------
+
+        max_attempts = 3
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                print(
+                    f"AI GENERATE ATTEMPT {attempt}/{max_attempts}"
+                )
+
+                if config is not None:
+                    response = client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=contents,
+                        config=config,
+                    )
+                else:
+                    response = client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=contents,
+                    )
+
+                print(
+                    f"AI GENERATE SUCCESS ON ATTEMPT {attempt}"
+                )
+
+                return jsonify({
+                    "ok": True,
+                    "answer": response.text
+                })
+
+            except Exception as e:
+                error_text = str(e)
+
+                print(
+                    f"AI GENERATE ATTEMPT {attempt} ERROR:",
+                    repr(e)
+                )
+
+                # Retry only temporary availability/rate-limit errors
+                temporary_error = (
+                    "503" in error_text
+                    or "UNAVAILABLE" in error_text
+                    or "429" in error_text
+                    or "RESOURCE_EXHAUSTED" in error_text
+                )
+
+                if not temporary_error:
+                    raise
+
+                if attempt < max_attempts:
+                    wait_seconds = 2 ** (attempt - 1)
+
+                    print(
+                        f"AI GENERATE RETRYING IN "
+                        f"{wait_seconds} SECONDS..."
+                    )
+
+                    time.sleep(wait_seconds)
+                else:
+                    raise
 
     except Exception as e:
         print("AI GENERATE ERROR:", repr(e))
