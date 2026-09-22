@@ -106,6 +106,14 @@ def ai_generate():
             )
         else:
             config = None
+        config_ready_time = round(
+            (time.perf_counter() - server_total_start) * 1000,
+            2
+        )
+
+        print(
+            f"SERVER CONFIG READY TIME: {config_ready_time} ms"
+        )
 
         # --------------------------------------------------------
         # Gemini request with retry
@@ -148,7 +156,7 @@ def ai_generate():
                 # ------------------------------------------------
                 # استخراج مصادر Google Search Grounding
                 # ------------------------------------------------
-
+                post_gemini_start = time.perf_counter()
                 grounding_sources = []
 
                 if google_search:
@@ -203,7 +211,14 @@ def ai_generate():
                             "GROUNDING SOURCE EXTRACTION ERROR:",
                             repr(source_error)
                         )
+                        grounding_time_ms = round(
+                            (time.perf_counter() - post_gemini_start) * 1000,
+                            2
+                        )
 
+                        print(
+                            f"GROUNDING EXTRACTION TIME: {grounding_time_ms} ms"
+                        )
                 # إزالة المصادر المكررة
                 unique_sources = []
                 seen_urls = set()
@@ -224,11 +239,23 @@ def ai_generate():
                 # Response
                 # ------------------------------------------------
 
+                answer_start = time.perf_counter()
+
+                answer_text = response.text
+
+                answer_time_ms = round(
+                    (time.perf_counter() - answer_start) * 1000,
+                    2
+                )
+
+                print(
+                    f"RESPONSE TEXT TIME: {answer_time_ms} ms"
+                )
+
                 result = {
                     "ok": True,
-                    "answer": response.text
+                    "answer": answer_text
                 }
-
                 if google_search:
                     result["grounding_sources"] = unique_sources
 
