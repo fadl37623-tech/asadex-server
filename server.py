@@ -1,5 +1,7 @@
 from flask import Flask, request, jsonify, redirect
 from authlib.integrations.flask_client import OAuth
+from google import genai
+from google.genai import types
 import psycopg2
 import hashlib
 import re
@@ -63,9 +65,6 @@ def ai_generate():
             contents = prompt
 
         import_start = time.perf_counter()
-
-        from google import genai
-        from google.genai import types
 
         import_time_ms = round(
             (time.perf_counter() - import_start) * 1000,
