@@ -118,6 +118,7 @@ def ai_generate():
                 print(
                     f"AI GENERATE ATTEMPT {attempt}/{max_attempts}"
                 )
+
                 gemini_start = time.perf_counter()
 
                 if config is not None:
@@ -132,10 +133,18 @@ def ai_generate():
                         contents=contents,
                     )
 
+                gemini_time_ms = round(
+                    (time.perf_counter() - gemini_start) * 1000,
+                    2
+                )
+
+                print(
+                    f"GEMINI REQUEST TIME: {gemini_time_ms} ms"
+                )
+
                 print(
                     f"AI GENERATE SUCCESS ON ATTEMPT {attempt}"
                 )
-
                 # ------------------------------------------------
                 # استخراج مصادر Google Search Grounding
                 # ------------------------------------------------
