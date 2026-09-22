@@ -62,8 +62,19 @@ def ai_generate():
 
             contents = prompt
 
+        import_start = time.perf_counter()
+
         from google import genai
         from google.genai import types
+
+        import_time_ms = round(
+            (time.perf_counter() - import_start) * 1000,
+            2
+        )
+
+        print(
+            f"SERVER GOOGLE IMPORT TIME: {import_time_ms} ms"
+        )
 
         client_start = time.perf_counter()
 
@@ -76,7 +87,12 @@ def ai_generate():
             2
         )
 
-        print(f"SERVER CLIENT INIT TIME: {client_time_ms} ms")
+        print(
+            f"SERVER CLIENT INIT TIME: {client_time_ms} ms"
+        )
+
+        config_start = time.perf_counter()
+
         config_kwargs = {}
 
         if system_instruction:
@@ -89,6 +105,38 @@ def ai_generate():
                 )
             )
 
+        if google_search:
+            config_kwargs["tools"] = [
+                types.Tool(
+                    google_search=types.GoogleSearch()
+                )
+            ]
+
+        if config_kwargs:
+            config = types.GenerateContentConfig(
+                **config_kwargs
+            )
+        else:
+            config = None
+
+        config_time_ms = round(
+            (time.perf_counter() - config_start) * 1000,
+            2
+        )
+
+        print(
+            f"SERVER CONFIG BUILD TIME: {config_time_ms} ms"
+        )
+
+        if system_instruction:
+            config_kwargs["system_instruction"] = system_instruction
+
+        if thinking_budget is not None:
+            config_kwargs["thinking_config"] = (
+                types.ThinkingConfig(
+                    thinking_budget=int(thinking_budget)
+                )
+            )
         # --------------------------------------------------------
         # Google Search Grounding
         # --------------------------------------------------------
