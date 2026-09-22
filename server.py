@@ -40,6 +40,10 @@ GOOGLE_CLIENT_SECRET = os.environ.get(
 @app.route("/ai/generate", methods=["POST"])
 def ai_generate():
     try:
+        import time
+        
+        server_total_start = time.perf_counter()
+        
         data = request.json or {}
 
         contents = data.get("contents")
@@ -60,12 +64,19 @@ def ai_generate():
 
         from google import genai
         from google.genai import types
-        import time
+
+        client_start = time.perf_counter()
 
         client = genai.Client(
             api_key=GEMINI_API_KEY
         )
 
+        client_time_ms = round(
+            (time.perf_counter() - client_start) * 1000,
+            2
+        )
+
+        print(f"SERVER CLIENT INIT TIME: {client_time_ms} ms")
         config_kwargs = {}
 
         if system_instruction:
@@ -107,6 +118,7 @@ def ai_generate():
                 print(
                     f"AI GENERATE ATTEMPT {attempt}/{max_attempts}"
                 )
+                gemini_start = time.perf_counter()
 
                 if config is not None:
                     response = client.models.generate_content(
@@ -215,6 +227,16 @@ def ai_generate():
                         "GROUNDING SOURCES FOUND:",
                         len(unique_sources)
                     )
+
+                server_total_time_ms = round(
+                    (time.perf_counter() - server_total_start) * 1000,
+                    2
+                )
+
+                print(
+                    f"SERVER TOTAL AI TIME: "
+                    f"{server_total_time_ms} ms"
+                )
 
                 return jsonify(result)
 
