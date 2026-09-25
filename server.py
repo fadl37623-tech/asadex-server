@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect
+from flask import Flask, request, jsonify, redirect, g
 from authlib.integrations.flask_client import OAuth
 from google import genai
 from google.genai import types
@@ -7,6 +7,11 @@ import hashlib
 import re
 import os
 import httpx
+import secrets
+import hmac
+import base64
+import json
+import time
 
 # ============================================================
 # Flask
@@ -18,6 +23,122 @@ app.secret_key = os.environ.get(
     "FLASK_SECRET_KEY",
     os.urandom(32)
 )
+
+# ============================================================
+# API Authentication Token
+# ============================================================
+
+TOKEN_EXPIRE_SECONDS = 60 * 60 * 24 * 30  # 30 days
+
+
+def get_token_secret():
+    secret = os.environ.get("FLASK_SECRET_KEY")
+
+    if not secret:
+        raise RuntimeError(
+            "FLASK_SECRET_KEY is not configured"
+        )
+
+    return secret.encode("utf-8")
+
+
+def create_auth_token(user_id):
+    payload = {
+        "user_id": int(user_id),
+        "exp": int(time.time()) + TOKEN_EXPIRE_SECONDS,
+        "nonce": secrets.token_hex(16),
+    }
+
+    raw = json.dumps(
+        payload,
+        separators=(",", ":"),
+        sort_keys=True
+    ).encode("utf-8")
+
+    encoded = base64.urlsafe_b64encode(
+        raw
+    ).decode("ascii").rstrip("=")
+
+    signature = hmac.new(
+        get_token_secret(),
+        encoded.encode("ascii"),
+        hashlib.sha256
+    ).digest()
+
+    signature_encoded = base64.urlsafe_b64encode(
+        signature
+    ).decode("ascii").rstrip("=")
+
+    return f"{encoded}.{signature_encoded}"
+
+
+def get_authenticated_user_id():
+    authorization = request.headers.get(
+        "Authorization",
+        ""
+    )
+
+    if not authorization.startswith("Bearer "):
+        return None
+
+    token = authorization[7:].strip()
+
+    if not token or "." not in token:
+        return None
+
+    try:
+        encoded, signature_encoded = token.split(
+            ".",
+            1
+        )
+
+        expected_signature = hmac.new(
+            get_token_secret(),
+            encoded.encode("ascii"),
+            hashlib.sha256
+        ).digest()
+
+        supplied_signature = base64.urlsafe_b64decode(
+            signature_encoded + "=" * (
+                -len(signature_encoded) % 4
+            )
+        )
+
+        if not hmac.compare_digest(
+            expected_signature,
+            supplied_signature
+        ):
+            return None
+
+        raw = base64.urlsafe_b64decode(
+            encoded + "=" * (
+                -len(encoded) % 4
+            )
+        )
+
+        payload = json.loads(
+            raw.decode("utf-8")
+        )
+
+        if int(payload["exp"]) < int(time.time()):
+            return None
+
+        return int(payload["user_id"])
+
+    except Exception:
+        return None
+
+def require_auth():
+    user_id = get_authenticated_user_id()
+
+    if user_id is None:
+        return jsonify({
+            "ok": False,
+            "error": "Authentication required"
+        }), 401
+
+    g.user_id = user_id
+    return None
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -2137,11 +2258,16 @@ def login():
 
         if user:
 
+            user_id = int(user[0])
+
+            token = create_auth_token(user_id)
+
             return jsonify({
                 "user": list(user),
-                "msg": ""
+                "msg": "",
+                "token": token
             })
-
+        
         return jsonify({
             "user": None,
             "msg": (
