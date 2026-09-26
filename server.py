@@ -1660,11 +1660,16 @@ def google_login_api():
 
         if user:
 
+            user_id = int(user[0])
+
+            token = create_auth_token(user_id)
+
             conn.close()
 
             return jsonify({
                 "user": list(user),
                 "google_id": google_id,
+                "token": token,
                 "msg": ""
             })
 
@@ -1708,10 +1713,16 @@ def google_login_api():
 
             user = c.fetchone()
 
+            user_id = int(user[0])
+
+            token = create_auth_token(user_id)
+
             conn.close()
+
             return jsonify({
                 "user": list(user),
                 "google_id": google_id,
+                "token": token,
                 "msg": ""
             })
 
@@ -1743,12 +1754,17 @@ def google_login_api():
 
         user = c.fetchone()
 
+        user_id = int(user[0])
+
+        token = create_auth_token(user_id)
+
         conn.commit()
         conn.close()
 
         return jsonify({
             "user": list(user),
             "google_id": google_id,
+            "token": token,
             "msg": ""
         })
 
@@ -2287,12 +2303,15 @@ def login():
 # Get user
 # ============================================================
 
-
 @app.route(
-    "/get_user/<int:user_id>",
+    "/get_user",
     methods=["GET"]
 )
-def get_user_by_id(user_id):
+def get_user_by_id():
+
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
 
     try:
 
@@ -2305,7 +2324,7 @@ def get_user_by_id(user_id):
             FROM students
             WHERE id=%s
             """,
-            (user_id,)
+            (g.user_id,)
         )
 
         user = c.fetchone()
@@ -2327,19 +2346,23 @@ def get_user_by_id(user_id):
             "msg": str(e)
         })
 
-
 # ============================================================
 # Daily limit
 # ============================================================
 
 
 @app.route(
-    "/check_limit/<int:user_id>",
+    "/check_limit",
     methods=["POST"]
 )
-def check_limit(user_id):
+def check_limit():
+
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
 
     import datetime
+    user_id = g.user_id
 
     try:
         conn = get_conn()
@@ -2503,12 +2526,15 @@ def check_limit(user_id):
 # Save question
 # ============================================================
 
-
 @app.route(
     "/save_question",
     methods=["POST"]
 )
 def save_question():
+
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
 
     data = request.json or {}
 
@@ -2534,7 +2560,7 @@ def save_question():
             VALUES (%s, %s, %s, %s)
             """,
             (
-                data["user_id"],
+                g.user_id,
                 data["question"],
                 data["answer"],
                 date
@@ -2555,17 +2581,19 @@ def save_question():
             "msg": str(e)
         })
 
-
 # ============================================================
 # Get questions
 # ============================================================
 
-
 @app.route(
-    "/get_questions/<int:user_id>",
+    "/get_questions",
     methods=["GET"]
 )
-def get_questions(user_id):
+def get_questions():
+
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
 
     try:
 
@@ -2582,7 +2610,7 @@ def get_questions(user_id):
             WHERE user_id=%s
             ORDER BY id DESC
             """,
-            (user_id,)
+            (g.user_id,)
         )
 
         rows = c.fetchall()
@@ -2602,7 +2630,6 @@ def get_questions(user_id):
             "questions": [],
             "msg": str(e)
         })
-
 
 # ============================================================
 # Feedback
@@ -2779,8 +2806,14 @@ DAILY_RESET_HOURS = 24
 # الحد "الثقيل" المشترك (3 طلبات -> قفل التطبيق كامل 10 ساعات)
 # ============================================================
 
-@app.route("/check_heavy_limit/<int:user_id>", methods=["POST"])
-def check_heavy_limit(user_id):
+@app.route("/check_heavy_limit", methods=["POST"])
+def check_heavy_limit():
+
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    user_id = g.user_id
 
     data = request.json or {}
     action_type = data.get("type", "unknown")  # للـ logging فقط
@@ -2886,8 +2919,11 @@ def check_heavy_limit(user_id):
 @app.route("/debug_reset_limit/<int:user_id>", methods=["POST", "GET"])
 def debug_reset_limit(user_id):
     secret = request.args.get("key", "")
-    if secret != os.environ.get("DEBUG_RESET_KEY", "change-me-please"):
+    expected = os.environ.get("DEBUG_RESET_KEY")
+
+    if not expected or not secrets.compare_digest(secret, expected):
         return jsonify({"ok": False, "msg": "Unauthorized"}), 403
+    
     try:
         conn = get_conn()
         c = conn.cursor()
@@ -2909,9 +2945,15 @@ def debug_reset_limit(user_id):
 # الحصص المنفصلة (تحويل لصورة / رسم / Similar+Challenge)
 # ============================================================
 
-@app.route("/check_feature_limit/<int:user_id>", methods=["POST"])
-def check_feature_limit(user_id):
+@app.route("/check_feature_limit", methods=["POST"])
+def check_feature_limit():
 
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    user_id = g.user_id
+    
     data = request.json or {}
     feature = data.get("feature", "")
 
@@ -3008,8 +3050,14 @@ GRACE_TEXT_LIMIT = 3
 # أسئلة نصية بالوضع الحر (3 فقط، تشتغل فقط أثناء القفل)
 # ============================================================
 
-@app.route("/check_grace_text/<int:user_id>", methods=["POST"])
-def check_grace_text(user_id):
+@app.route("/check_grace_text", methods=["POST"])
+def check_grace_text():
+
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    user_id = g.user_id
 
     try:
         conn = get_conn()
@@ -3080,9 +3128,15 @@ def check_grace_text(user_id):
 # ميزة واحدة مشتركة بالوضع الحر (تحويل لصورة أو رسم - أيّهما أولاً)
 # ============================================================
 
-@app.route("/check_grace_feature/<int:user_id>", methods=["POST"])
+@app.route("/check_grace_feature", methods=["POST"])
 def check_grace_feature(user_id):
 
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    user_id = g.user_id
+    
     try:
         conn = get_conn()
         c = conn.cursor()
