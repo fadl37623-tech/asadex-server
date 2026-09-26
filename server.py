@@ -162,6 +162,10 @@ GOOGLE_CLIENT_SECRET = os.environ.get(
 )
 @app.route("/ai/generate", methods=["POST"])
 def ai_generate():
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
     try:
         import time
         
@@ -1054,6 +1058,10 @@ def record_analytics(
 )
 def analytics_event():
 
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
     data = request.json or {}
 
     event_type = data.get("event_type")
@@ -1066,7 +1074,7 @@ def analytics_event():
 
     success = record_analytics(
         event_type=event_type,
-        user_id=data.get("user_id"),
+        user_id=g.user_id,
         question=data.get("question"),
         subject=data.get("subject"),
         language=data.get("language"),
@@ -1174,6 +1182,10 @@ def ai_cache_test():
 
 @app.route("/ai/cache-save", methods=["POST"])
 def ai_cache_save():
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
     try:
         data = request.get_json(silent=True) or {}
 
@@ -1983,6 +1995,12 @@ def google_mobile_exchange():
 )
 def init_db():
 
+    secret = request.args.get("key", "")
+    expected = os.environ.get("ADMIN_INIT_KEY")
+
+    if not expected or not secrets.compare_digest(secret, expected):
+        return jsonify({"ok": False, "msg": "Unauthorized"}), 403
+
     try:
 
         conn = get_conn()
@@ -2642,11 +2660,13 @@ def get_questions():
 )
 def submit_feedback():
 
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
     data = request.json or {}
 
-    user_id = data.get(
-        "user_id"
-    )
+    user_id = g.user_id
 
     rating = data.get(
         "rating"
@@ -3129,7 +3149,7 @@ def check_grace_text():
 # ============================================================
 
 @app.route("/check_grace_feature", methods=["POST"])
-def check_grace_feature(user_id):
+def check_grace_feature():
 
     auth_error = require_auth()
     if auth_error:
