@@ -26,6 +26,27 @@ app.secret_key = os.environ.get(
 )
 
 # ============================================================
+# Rate Limiting
+# ============================================================
+
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    storage_uri="memory://",
+    default_limits=[],
+)
+
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    return jsonify({
+        "ok": False,
+        "msg": "Too many attempts. Please wait a moment and try again."
+    }), 429
+
+# ============================================================
 # API Authentication Token
 # ============================================================
 
@@ -1655,6 +1676,7 @@ def google_callback():
     "/google-login",
     methods=["POST"]
 )
+@limiter.limit("10 per 5 minutes")
 def google_login_api():
 
     data = request.json or {}
@@ -2173,6 +2195,7 @@ def init_db():
     "/register",
     methods=["POST"]
 )
+@limiter.limit("3 per hour")
 def register():
 
     data = request.json or {}
@@ -2281,6 +2304,7 @@ def register():
     "/login",
     methods=["POST"]
 )
+@limiter.limit("5 per 5 minutes")
 def login():
 
     data = request.json or {}
