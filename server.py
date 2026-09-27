@@ -4,6 +4,7 @@ from google import genai
 from google.genai import types
 import psycopg2
 import hashlib
+import bcrypt
 import re
 import os
 import httpx
@@ -525,11 +526,48 @@ def get_conn():
         sslmode="require"
     )
 
-
 def hash_password(password):
-    return hashlib.sha256(
-        password.encode()
-    ).hexdigest()
+    """
+    يُستخدم فقط لكلمات مرور جديدة (تسجيل حساب جديد،
+    أو إعادة تشفير كلمة مرور قديمة بعد تحقق ناجح).
+    """
+    return bcrypt.hashpw(
+        password.encode("utf-8"),
+        bcrypt.gensalt()
+    ).decode("utf-8")
+
+
+def is_legacy_sha256_hash(stored_hash):
+    """
+    كلمات المرور القديمة كانت SHA-256: نص hex ثابت طوله 64 حرف.
+    كلمات bcrypt الجديدة تبدأ بـ $2b$ أو $2a$ وطولها مختلف.
+    """
+    return (
+        len(stored_hash) == 64
+        and all(c in "0123456789abcdef" for c in stored_hash.lower())
+    )
+
+def verify_legacy_sha256(password, stored_hash):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest() == stored_hash
+
+def verify_password(password, stored_hash):
+    """
+    يتحقق من كلمة المرور بغض النظر عن نوع التشفير المخزّن،
+    ويرجّع أيضًا إشارة إذا كان لازم نرحّل الهاش لـ bcrypt.
+    Returns: (is_valid: bool, needs_migration: bool)
+    """
+    if is_legacy_sha256_hash(stored_hash):
+        valid = verify_legacy_sha256(password, stored_hash)
+        return valid, valid  # لو صحيح، نحتاج نرحّله
+
+    try:
+        valid = bcrypt.checkpw(
+            password.encode("utf-8"),
+            stored_hash.encode("utf-8")
+        )
+        return valid, False
+    except Exception:
+        return False, False
 
 # ============================================================
 # AI CACHE + ANALYTICS + FEEDBACK SYSTEM
@@ -2278,35 +2316,60 @@ def login():
             SELECT *
             FROM students
             WHERE email=%s
-            AND password=%s
             """,
-            (
-                email,
-                hash_password(password)
-            )
+            (email,)
         )
 
         user = c.fetchone()
 
+        if not user:
+            conn.close()
+            return jsonify({
+                "user": None,
+                "msg": "Incorrect email or password"
+            })
+
+        stored_hash = user[2]
+
+        is_valid, needs_migration = verify_password(
+            password,
+            stored_hash
+        )
+
+        if not is_valid:
+            conn.close()
+            return jsonify({
+                "user": None,
+                "msg": "Incorrect email or password"
+            })
+
+        # ─── ترحيل صامت لـ bcrypt عند أول تسجيل دخول ناجح ───
+        if needs_migration:
+            try:
+                new_hash = hash_password(password)
+                c.execute(
+                    """
+                    UPDATE students
+                    SET password=%s
+                    WHERE id=%s
+                    """,
+                    (new_hash, user[0])
+                )
+                conn.commit()
+                print(f"MIGRATED PASSWORD HASH FOR USER {user[0]}")
+            except Exception as migrate_error:
+                print("PASSWORD MIGRATION ERROR:", migrate_error)
+                conn.rollback()
+
         conn.close()
 
-        if user:
+        user_id = int(user[0])
+        token = create_auth_token(user_id)
 
-            user_id = int(user[0])
-
-            token = create_auth_token(user_id)
-
-            return jsonify({
-                "user": list(user),
-                "msg": "",
-                "token": token
-            })
-        
         return jsonify({
-            "user": None,
-            "msg": (
-                "Incorrect email or password"
-            )
+            "user": list(user),
+            "msg": "",
+            "token": token
         })
 
     except Exception as e:
@@ -2315,8 +2378,7 @@ def login():
             "user": None,
             "msg": str(e)
         })
-
-
+    
 # ============================================================
 # Get user
 # ============================================================
