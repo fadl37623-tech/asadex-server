@@ -1280,7 +1280,7 @@ def analytics_summary():
     secret = request.args.get("key", "")
     expected = os.environ.get("ANALYTICS_KEY")
 
-    if not expected or not secrets.compare_digest(secret, expected):
+    if not expected or not secrets.compare_digest(secret.encode("utf-8"), expected.encode("utf-8")):
         return jsonify({"ok": False, "msg": "Unauthorized"}), 403
 
     conn = None
@@ -2041,7 +2041,7 @@ def init_db():
     secret = request.args.get("key", "")
     expected = os.environ.get("ADMIN_INIT_KEY")
 
-    if not expected or not secrets.compare_digest(secret, expected):
+    if not expected or not secrets.compare_digest(secret.encode("utf-8"), expected.encode("utf-8")):
         return jsonify({"ok": False, "msg": "Unauthorized"}), 403
 
     try:
@@ -3008,7 +3008,7 @@ def debug_reset_limit(user_id):
     secret = request.args.get("key", "")
     expected = os.environ.get("DEBUG_RESET_KEY")
 
-    if not expected or not secrets.compare_digest(secret, expected):
+    if not expected or not secrets.compare_digest(secret.encode("utf-8"), expected.encode("utf-8")):
         return jsonify({"ok": False, "msg": "Unauthorized"}), 403
     
     try:
