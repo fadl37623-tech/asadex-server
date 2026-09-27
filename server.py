@@ -1151,13 +1151,17 @@ def analytics_event():
 )
 def ai_cache_test():
 
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
     data = request.json or {}
 
     question = data.get(
         "question",
         ""
     ).strip()
-
+    
     subject = data.get(
         "subject",
         ""
