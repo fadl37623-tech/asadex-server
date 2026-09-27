@@ -6,4 +6,4 @@ Authlib
 requests
 httpx
 bcrypt
-Flask-Limiter
+flask-limiter
