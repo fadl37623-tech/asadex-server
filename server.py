@@ -1271,12 +1271,17 @@ def ai_cache_save():
 # ============================================================
 # Analytics summary
 # ============================================================
-
 @app.route(
     "/analytics/summary",
     methods=["GET"]
 )
 def analytics_summary():
+
+    secret = request.args.get("key", "")
+    expected = os.environ.get("ANALYTICS_KEY")
+
+    if not expected or not secrets.compare_digest(secret, expected):
+        return jsonify({"ok": False, "msg": "Unauthorized"}), 403
 
     conn = None
 
@@ -1284,7 +1289,7 @@ def analytics_summary():
 
         conn = get_conn()
         c = conn.cursor()
-
+        
         # Total questions
         c.execute(
             """
