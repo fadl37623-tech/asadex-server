@@ -1280,9 +1280,15 @@ def analytics_summary():
     secret = request.args.get("key", "")
     expected = os.environ.get("ANALYTICS_KEY")
 
+    print("DEBUG - received key:", repr(secret))
+    print("DEBUG - expected key:", repr(expected))
+    print("DEBUG - received length:", len(secret))
+    print("DEBUG - expected length:", len(expected) if expected else 0)
+    print("DEBUG - match:", secret == expected)
+
     if not expected or not secrets.compare_digest(secret.encode("utf-8"), expected.encode("utf-8")):
         return jsonify({"ok": False, "msg": "Unauthorized"}), 403
-
+    
     conn = None
 
     try:
