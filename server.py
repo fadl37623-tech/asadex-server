@@ -590,6 +590,17 @@ def verify_password(password, stored_hash):
     except Exception:
         return False, False
 
+def safe_user(user_row):
+    """
+    يرجع نفس ترتيب الأعمدة (id, email, password, name, google_id)
+    لكن بدون تسريب الهاش أو google_id.
+    """
+    u = list(user_row)
+    u[2] = ""    # password hash
+    if len(u) > 4:
+        u[4] = None  # google_id
+    return u
+
 # ============================================================
 # AI CACHE + ANALYTICS + FEEDBACK SYSTEM
 # ============================================================
@@ -1558,7 +1569,7 @@ def google_callback():
             conn.close()
             return jsonify({
                 "ok": True,
-                "user": list(user),
+                "user": safe_user(user),
                 "google_id": google_id,
                 "msg": "Google login successful"
             })
@@ -1606,7 +1617,7 @@ def google_callback():
 
             return jsonify({
                 "ok": True,
-                "user": list(user),
+                "user": safe_user(user),
                 "google_id": google_id,
                 "msg": (
                     "Google account linked "
@@ -1647,7 +1658,7 @@ def google_callback():
 
         return jsonify({
             "ok": True,
-            "user": list(user),
+            "user": safe_user(user),
             "google_id": google_id,
             "msg": (
                 "Google account "
@@ -1748,7 +1759,7 @@ def google_login_api():
             conn.close()
 
             return jsonify({
-                "user": list(user),
+                "user": safe_user(user),
                 "google_id": google_id,
                 "token": token,
                 "msg": ""
@@ -1801,7 +1812,7 @@ def google_login_api():
             conn.close()
 
             return jsonify({
-                "user": list(user),
+                "user": safe_user(user),
                 "google_id": google_id,
                 "token": token,
                 "msg": ""
@@ -1843,7 +1854,7 @@ def google_login_api():
         conn.close()
 
         return jsonify({
-            "user": list(user),
+            "user": safe_user(user),
             "google_id": google_id,
             "token": token,
             "msg": ""
@@ -1892,7 +1903,7 @@ def upsert_google_user(google_id, email, name):
 
     if user:
         conn.close()
-        return list(user)
+        return safe_user(user)
 
     c.execute(
         """
@@ -1930,7 +1941,7 @@ def upsert_google_user(google_id, email, name):
 
         user = c.fetchone()
         conn.close()
-        return list(user)
+        return safe_user(user)
 
     random_password = os.urandom(32).hex()
 
@@ -1953,7 +1964,7 @@ def upsert_google_user(google_id, email, name):
     conn.commit()
     conn.close()
 
-    return list(user)
+    return safe_user(user)
 
 
 @app.route(
@@ -2400,7 +2411,7 @@ def login():
         token = create_auth_token(user_id)
 
         return jsonify({
-            "user": list(user),
+            "user": safe_user(user),
             "msg": "",
             "token": token
         })
@@ -2446,7 +2457,7 @@ def get_user_by_id():
 
         return jsonify({
             "user": (
-                list(user)
+                safe_user(user)
                 if user
                 else None
             )
