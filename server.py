@@ -46,6 +46,14 @@ def ratelimit_handler(e):
         "msg": "Too many attempts. Please wait a moment and try again."
     }), 429
 
+@app.errorhandler(500)
+def internal_error_handler(e):
+    print("INTERNAL ERROR:", repr(e))
+    return jsonify({
+        "ok": False,
+        "msg": "Internal server error."
+    }), 500
+
 # ============================================================
 # API Authentication Token
 # ============================================================
@@ -506,7 +514,7 @@ def ai_generate():
 
         return jsonify({
             "ok": False,
-            "error": str(e)
+            "error": "Something went wrong."
         }), 500
           
 # ============================================================
@@ -2246,11 +2254,8 @@ def login():
         })
 
     except Exception as e:
-
-        return jsonify({
-            "user": None,
-            "msg": str(e)
-        })
+        print("ERROR in login:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
     
 # ============================================================
 # Get user
@@ -2293,11 +2298,8 @@ def get_user_by_id():
         })
 
     except Exception as e:
-
-        return jsonify({
-            "user": None,
-            "msg": str(e)
-        })
+        print("ERROR in get_user_by_id:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
 
 # ============================================================
 # Daily limit
@@ -2535,12 +2537,8 @@ def save_question():
         })
 
     except Exception as e:
-
-        return jsonify({
-            "ok": False,
-            "msg": str(e)
-        })
-
+        print("ERROR in save_question:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
 # ============================================================
 # Get questions
 # ============================================================
@@ -2585,11 +2583,8 @@ def get_questions():
         })
 
     except Exception as e:
-
-        return jsonify({
-            "questions": [],
-            "msg": str(e)
-        })
+        print("ERROR in get_questions:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
 
 # ============================================================
 # Feedback
@@ -2790,7 +2785,11 @@ def check_heavy_limit():
     
     data = request.json or {}
     action_type = data.get("type", "unknown")  # للـ logging فقط
-    weight = int(data.get("weight", 1))
+    try:
+        weight = max(1, min(int(data.get("weight", 1)), 5))
+    except (TypeError, ValueError):
+        return jsonify({"allowed": False, "remaining": 0, "msg": "Invalid weight."}), 400
+    
     try:
         conn = get_conn()
         c = conn.cursor()
@@ -2887,7 +2886,8 @@ def check_heavy_limit():
         })
 
     except Exception as e:
-        return jsonify({"allowed": False, "remaining": 0, "msg": str(e)}), 500
+        print("ERROR in check_heavy_limit:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
 
 @app.route("/debug_reset_limit/<int:user_id>", methods=["POST", "GET"])
 def debug_reset_limit(user_id):
@@ -2913,7 +2913,8 @@ def debug_reset_limit(user_id):
         conn.close()
         return jsonify({"ok": True, "msg": "Limit reset."})
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        print("ERROR in <اسم الدالة>:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
 # ============================================================
 # الحصص المنفصلة (تحويل لصورة / رسم / Similar+Challenge)
 # ============================================================
@@ -3022,7 +3023,8 @@ def check_feature_limit():
         })
 
     except Exception as e:
-        return jsonify({"allowed": False, "remaining": 0, "msg": str(e)}), 500
+        print("ERROR in check_feature_limit:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
 # ============================================================
 
 GRACE_TEXT_LIMIT = 3
@@ -3108,7 +3110,8 @@ def check_grace_text():
         })
 
     except Exception as e:
-        return jsonify({"allowed": False, "remaining": 0, "msg": str(e)}), 500
+        print("ERROR in check_grace_text:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
 
 
 # ============================================================
@@ -3186,7 +3189,8 @@ def check_grace_feature():
         })
 
     except Exception as e:
-        return jsonify({"allowed": False, "msg": str(e)}), 500
+        print("ERROR in check_grace_feature:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
 if __name__ == "__main__":
 
     port = int(
