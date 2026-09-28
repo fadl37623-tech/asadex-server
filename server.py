@@ -1689,189 +1689,12 @@ def google_callback():
 )
 @limiter.limit("10 per 5 minutes")
 def google_login_api():
-
-    data = request.json or {}
-
-    google_id = str(
-        data.get(
-            "google_id",
-            ""
-        )
-    ).strip()
-
-    email = (
-        data.get(
-            "email",
-            ""
-        )
-        .strip()
-        .lower()
-    )
-
-    name = (
-        data.get(
-            "name",
-            ""
-        )
-        .strip()
-    )
-
-    if not google_id:
-
-        return jsonify({
-            "user": None,
-            "msg": "Google ID is missing"
-        }), 400
-
-    if not validate_email(email):
-
-        return jsonify({
-            "user": None,
-            "msg": "Invalid Google email"
-        }), 400
-
-    if not name:
-
-        name = email.split("@")[0]
-
-    try:
-
-        conn = get_conn()
-        c = conn.cursor()
-
-        c.execute(
-            """
-            SELECT *
-            FROM students
-            WHERE google_id=%s
-            """,
-            (google_id,)
-        )
-
-        user = c.fetchone()
-
-        if user:
-
-            user_id = int(user[0])
-
-            token = create_auth_token(user_id)
-
-            conn.close()
-
-            return jsonify({
-                "user": safe_user(user),
-                "google_id": google_id,
-                "token": token,
-                "msg": ""
-            })
-
-        c.execute(
-            """
-            SELECT *
-            FROM students
-            WHERE email=%s
-            """,
-            (email,)
-        )
-
-        user = c.fetchone()
-
-        if user:
-
-            user_id = user[0]
-
-            c.execute(
-                """
-                UPDATE students
-                SET google_id=%s
-                WHERE id=%s
-                """,
-                (
-                    google_id,
-                    user_id
-                )
-            )
-
-            conn.commit()
-
-            c.execute(
-                """
-                SELECT *
-                FROM students
-                WHERE id=%s
-                """,
-                (user_id,)
-            )
-
-            user = c.fetchone()
-
-            user_id = int(user[0])
-
-            token = create_auth_token(user_id)
-
-            conn.close()
-
-            return jsonify({
-                "user": safe_user(user),
-                "google_id": google_id,
-                "token": token,
-                "msg": ""
-            })
-
-        random_password = os.urandom(
-            32
-        ).hex()
-
-        c.execute(
-            """
-            INSERT INTO students
-            (
-                email,
-                password,
-                name,
-                google_id
-            )
-            VALUES (%s, %s, %s, %s)
-            RETURNING *
-            """,
-            (
-                email,
-                hash_password(
-                    random_password
-                ),
-                name,
-                google_id
-            )
-        )
-
-        user = c.fetchone()
-
-        user_id = int(user[0])
-
-        token = create_auth_token(user_id)
-
-        conn.commit()
-        conn.close()
-
-        return jsonify({
-            "user": safe_user(user),
-            "google_id": google_id,
-            "token": token,
-            "msg": ""
-        })
-
-    except Exception as e:
-
-        print(
-            "Google API error:",
-            e
-        )
-
-        return jsonify({
-            "user": None,
-            "msg": str(e)
-        }), 500
-
+    # معطّل: كان يثق ببيانات Google القادمة من العميل (ثغرة انتحال).
+    # سيُستبدل لاحقاً بنسخة تتحقق من access_token عبر Google.
+    return jsonify({
+        "user": None,
+        "msg": "This login method is disabled."
+    }), 410
 
 # ============================================================
 # Mobile Google OAuth - Exchange code for token (Android/iOS)
@@ -2035,7 +1858,11 @@ def google_mobile_exchange():
         email = user_info.get("email", "").strip().lower()
         name = user_info.get("name", "").strip()
 
-        if not google_id or not validate_email(email):
+        if (
+            not google_id
+            or not validate_email(email)
+            or not user_info.get("email_verified", False)
+        ):
 
             return jsonify({
                 "ok": False,
@@ -2047,10 +1874,12 @@ def google_mobile_exchange():
 
         user = upsert_google_user(google_id, email, name)
 
+        token = create_auth_token(int(user[0]))
+
         return jsonify({
             "ok": True,
             "user": user,
-            "google_id": google_id,
+            "token": token,
             "msg": ""
         })
 
