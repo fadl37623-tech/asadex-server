@@ -2477,6 +2477,13 @@ def check_limit():
     import datetime
     user_id = g.user_id
 
+    if user_id in DEVELOPER_USER_IDS:
+        return jsonify({
+            "allowed": True,
+            "remaining": 999,
+            "msg": "Developer account - unlimited."
+        })
+    
     try:
         conn = get_conn()
         c = conn.cursor()
@@ -2916,6 +2923,10 @@ FEATURE_LIMITS = {
 
 DAILY_RESET_HOURS = 24
 
+DEVELOPER_USER_IDS = {
+    int(x) for x in os.environ.get("DEVELOPER_USER_IDS", "").split(",")
+    if x.strip().isdigit()
+}
 
 # ============================================================
 # الحد "الثقيل" المشترك (3 طلبات -> قفل التطبيق كامل 10 ساعات)
@@ -2930,6 +2941,13 @@ def check_heavy_limit():
 
     user_id = g.user_id
 
+    if user_id in DEVELOPER_USER_IDS:
+        return jsonify({
+            "allowed": True,
+            "remaining": 999,
+            "msg": "Developer account - unlimited."
+        })
+    
     data = request.json or {}
     action_type = data.get("type", "unknown")  # للـ logging فقط
     weight = int(data.get("weight", 1))
@@ -3068,6 +3086,13 @@ def check_feature_limit():
         return auth_error
 
     user_id = g.user_id
+
+    if user_id in DEVELOPER_USER_IDS:
+        return jsonify({
+            "allowed": True,
+            "remaining": 999,
+            "msg": "Developer account - unlimited."
+        })
     
     data = request.json or {}
     feature = data.get("feature", "")
@@ -3174,6 +3199,13 @@ def check_grace_text():
 
     user_id = g.user_id
 
+    if user_id in DEVELOPER_USER_IDS:
+        return jsonify({
+            "allowed": True,
+            "remaining": 999,
+            "msg": "Developer account - unlimited."
+        })
+    
     try:
         conn = get_conn()
         c = conn.cursor()
@@ -3251,6 +3283,13 @@ def check_grace_feature():
         return auth_error
 
     user_id = g.user_id
+
+    if user_id in DEVELOPER_USER_IDS:
+        return jsonify({
+            "allowed": True,
+            "remaining": 999,
+            "msg": "Developer account - unlimited."
+        })
     
     try:
         conn = get_conn()
