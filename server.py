@@ -599,15 +599,11 @@ def verify_password(password, stored_hash):
         return False, False
 
 def safe_user(user_row):
-    """
-    يرجع نفس ترتيب الأعمدة (id, email, password, name, google_id)
-    لكن بدون تسريب الهاش أو google_id.
-    """
-    u = list(user_row)
-    u[2] = ""    # password hash
-    if len(u) > 4:
-        u[4] = None  # google_id
-    return u
+    return [
+        user_row[0],  # id
+        user_row[1],  # email
+        user_row[3],  # name
+    ]
 
 # ============================================================
 # AI CACHE + ANALYTICS + FEEDBACK SYSTEM
