@@ -2137,11 +2137,12 @@ def register():
 
     except Exception as e:
 
+        print("ERROR in register:", repr(e))
+
         return jsonify({
             "ok": False,
-            "msg": str(e)
-        })
-
+            "msg": "Something went wrong."
+        }), 500
 
 # ============================================================
 # Login
