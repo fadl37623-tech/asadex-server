@@ -1749,21 +1749,50 @@ def google_callback():
 )
 @limiter.limit("10 per 5 minutes")
 def google_login_api():
-    # معطّل: كان يثق ببيانات Google القادمة من العميل (ثغرة انتحال).
-    # سيُستبدل لاحقاً بنسخة تتحقق من access_token عبر Google.
-    return jsonify({
-        "user": None,
-        "msg": "This login method is disabled."
-    }), 410
 
-# ============================================================
-# Mobile Google OAuth - Exchange code for token (Android/iOS)
-#
-# يُستخدم من تطبيق Flet (Android/iOS) بدل تبادل الكود مباشرة
-# مع جوجل، حتى لا يحتوي التطبيق على GOOGLE_CLIENT_SECRET.
-# السر يبقى محفوظاً هنا فقط كمتغير بيئة على السيرفر.
-# ============================================================
+    data = request.json or {}
+    access_token = str(data.get("access_token", "")).strip()
 
+    if not access_token:
+        return jsonify({"user": None, "msg": "Missing Google access token"}), 400
+
+    try:
+        resp = httpx.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return jsonify({"user": None, "msg": "Invalid Google token"}), 401
+        info = resp.json()
+    except Exception as e:
+        print("Google verify error:", repr(e))
+        return jsonify({"user": None, "msg": "Could not verify Google account"}), 502
+
+    google_id = str(info.get("sub", "")).strip()
+    email = str(info.get("email", "")).strip().lower()
+    name = str(info.get("name", "")).strip()
+
+    if not google_id or not validate_email(email) or not info.get("email_verified", False):
+        return jsonify({"user": None, "msg": "Invalid Google account data"}), 400
+
+    if not name:
+        name = email.split("@")[0]
+
+    try:
+        user = upsert_google_user(google_id, email, name)
+        token = create_auth_token(int(user[0]))
+
+        return jsonify({
+            "user": safe_user(user),
+            "token": token,
+            "msg": ""
+        })
+    except Exception as e:
+        print("Google login error:", repr(e))
+        return jsonify({"user": None, "msg": "Login failed"}), 500
+    
+# ============================================================
 
 def upsert_google_user(google_id, email, name):
     """
