@@ -600,9 +600,11 @@ def verify_password(password, stored_hash):
 
 def safe_user(user_row):
     return [
-        user_row[0],  # id
-        user_row[1],  # email
-        user_row[3],  # name
+        user_row[0],   # id
+        user_row[1],   # email
+        "",             # password hash - مخفي
+        user_row[3],   # name
+        None,           # google_id - مخفي
     ]
 
 # ============================================================
