@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect, g
+from flask import Flask, request, jsonify, redirect, g, Response, stream_with_context
 from authlib.integrations.flask_client import OAuth
 from google import genai
 from google.genai import types
@@ -516,7 +516,61 @@ def ai_generate():
             "ok": False,
             "error": "Something went wrong."
         }), 500
-          
+
+@app.route("/ai/generate-stream", methods=["POST"])
+def ai_generate_stream():
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    data = request.json or {}
+    contents = data.get("contents")
+    prompt = data.get("prompt")
+    system_instruction = data.get("system_instruction")
+    thinking_budget = data.get("thinking_budget")
+
+    if contents is None:
+        if not prompt:
+            return jsonify({"ok": False, "error": "prompt is required"}), 400
+        contents = prompt
+
+    def generate():
+        try:
+            client = genai.Client(api_key=GEMINI_API_KEY)
+
+            config_kwargs = {}
+            if system_instruction:
+                config_kwargs["system_instruction"] = system_instruction
+            if thinking_budget is not None:
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    thinking_budget=int(thinking_budget)
+                )
+
+            config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+
+            stream = client.models.generate_content_stream(
+                model="gemini-2.5-flash",
+                contents=contents,
+                config=config,
+            ) if config else client.models.generate_content_stream(
+                model="gemini-2.5-flash",
+                contents=contents,
+            )
+
+            for chunk in stream:
+                text = getattr(chunk, "text", None)
+                if text:
+                    yield text
+
+        except Exception as e:
+            print("STREAM ERROR:", repr(e))
+            yield f"\n\n[ERROR: {str(e)}]"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/plain",
+    )
+
 # ============================================================
 # Google OAuth
 # ============================================================
