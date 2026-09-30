@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify, redirect, g, Response, stream_with_co
 from authlib.integrations.flask_client import OAuth
 from google import genai
 from google.genai import types
+from gtts import gTTS
+import io
 import psycopg2
 import hashlib
 import bcrypt
@@ -1364,6 +1366,53 @@ def ai_cache_save():
             "ok": False,
             "error": str(e)
         }), 500
+
+def strip_markdown_for_speech(text):
+    """يزيل رموز الماركداون حتى لا يُنطق ** أو # أو | بصوت عالٍ."""
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.*?)\*', r'\1', text)
+    text = re.sub(r'#+\s*', '', text)
+    text = re.sub(r'==(.*?)==', r'\1', text)
+    text = re.sub(r'[-|]{2,}', '', text)
+    text = re.sub(r'\|', ' ', text)
+    return text.strip()
+
+
+@app.route("/tts", methods=["POST"])
+def text_to_speech():
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    data = request.json or {}
+    text = str(data.get("text", "")).strip()
+    language = str(data.get("language", "ar")).strip()
+
+    if not text:
+        return jsonify({"ok": False, "msg": "Text is required"}), 400
+
+    if len(text) > 3000:
+        text = text[:3000]
+
+    text = strip_markdown_for_speech(text)
+
+    if not text:
+        return jsonify({"ok": False, "msg": "No speakable text"}), 400
+
+    try:
+        lang_code = "ar" if language.startswith("ar") else "en"
+
+        tts = gTTS(text=text, lang=lang_code)
+        buffer = io.BytesIO()
+        tts.write_to_fp(buffer)
+        buffer.seek(0)
+
+        return Response(buffer.read(), mimetype="audio/mpeg")
+
+    except Exception as e:
+        print("TTS ERROR:", repr(e))
+        return jsonify({"ok": False, "msg": "Could not generate speech"}), 500
+
 # ============================================================
 # Analytics summary
 # ============================================================
