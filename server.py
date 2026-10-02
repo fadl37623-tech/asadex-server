@@ -3025,31 +3025,40 @@ def debug_reset_limit(user_id):
     secret = request.args.get("key", "")
     expected = os.environ.get("DEBUG_RESET_KEY")
 
-    if not expected or not secrets.compare_digest(secret.encode("utf-8"), expected.encode("utf-8")):
+    if not expected or not secrets.compare_digest(
+        secret.encode("utf-8"), expected.encode("utf-8")
+    ):
         return jsonify({"ok": False, "msg": "Unauthorized"}), 403
-    
+
     try:
         conn = get_conn()
         c = conn.cursor()
         c.execute(
             """
             UPDATE usage_limits_v2
-            SET heavy_count=0, heavy_locked_until=NULL,
-                grace_text_count=0, grace_feature_used=FALSE
+            SET heavy_count=0,
+                heavy_locked_until=NULL,
+                grace_text_count=0,
+                grace_feature_used=FALSE,
+                image_convert_count=0,
+                drawing_count=0,
+                similar_challenge_count=0,
+                daily_reset_time=%s
             WHERE user_id=%s
             """,
-            (user_id,)
+            (datetime.datetime.now(), user_id),
         )
         conn.commit()
         conn.close()
-        return jsonify({"ok": True, "msg": "Limit reset."})
+        return jsonify({"ok": True, "msg": "All limits reset."})
     except Exception as e:
-        print("ERROR in <اسم الدالة>:", repr(e))
+        print("ERROR in debug_reset_limit:", repr(e))
         return jsonify({"ok": False, "msg": "Something went wrong."}), 500
-# ============================================================
-# الحصص المنفصلة (تحويل لصورة / رسم / Similar+Challenge)
-# ============================================================
 
+
+# ------------------------------------------------------------
+# 2) check_feature_limit مع تصفير يومي شامل لكل العدّادات
+# ------------------------------------------------------------
 @app.route("/check_feature_limit", methods=["POST"])
 def check_feature_limit():
 
@@ -3065,7 +3074,7 @@ def check_feature_limit():
             "remaining": 999,
             "msg": "Developer account - unlimited."
         })
-    
+
     data = request.json or {}
     feature = data.get("feature", "")
 
@@ -3118,12 +3127,25 @@ def check_feature_limit():
 
         count, daily_reset_time = row
 
-        # ─── تصفير يومي (24 ساعة) ───
-        if now - daily_reset_time >= datetime.timedelta(hours=DAILY_RESET_HOURS):
+        # ─── تصفير يومي شامل: كل العدّادات معاً (لأن الوقت مشترك) ───
+        if daily_reset_time is None or now - daily_reset_time >= datetime.timedelta(hours=DAILY_RESET_HOURS):
+            c.execute(
+                """
+                UPDATE usage_limits_v2
+                SET heavy_count=0,
+                    image_convert_count=0,
+                    drawing_count=0,
+                    similar_challenge_count=0,
+                    daily_reset_time=%s
+                WHERE user_id=%s
+                """,
+                (now, user_id)
+            )
             count = 0
             daily_reset_time = now
 
         if count >= limit:
+            conn.commit()
             conn.close()
             time_left = datetime.timedelta(hours=DAILY_RESET_HOURS) - (now - daily_reset_time)
             hours, rem = divmod(int(time_left.total_seconds()), 3600)
@@ -3139,10 +3161,10 @@ def check_feature_limit():
         c.execute(
             f"""
             UPDATE usage_limits_v2
-            SET {column}=%s, daily_reset_time=%s
+            SET {column}=%s
             WHERE user_id=%s
             """,
-            (new_count, daily_reset_time, user_id)
+            (new_count, user_id)
         )
         conn.commit()
         conn.close()
@@ -3155,6 +3177,52 @@ def check_feature_limit():
 
     except Exception as e:
         print("ERROR in check_feature_limit:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
+
+
+# ------------------------------------------------------------
+# 3) جديد: استرجاع محاولة إذا فشلت العملية (لا تُحسب على المستخدم)
+# ------------------------------------------------------------
+@app.route("/refund_feature", methods=["POST"])
+def refund_feature():
+
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    user_id = g.user_id
+
+    if user_id in DEVELOPER_USER_IDS:
+        return jsonify({"ok": True})
+
+    feature = (request.json or {}).get("feature", "")
+
+    column_map = {
+        "image_convert": "image_convert_count",
+        "drawing": "drawing_count",
+        "similar_challenge": "similar_challenge_count",
+    }
+    column = column_map.get(feature)
+
+    if not column:
+        return jsonify({"ok": False, "msg": "Unknown feature."}), 400
+
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute(
+            f"""
+            UPDATE usage_limits_v2
+            SET {column} = GREATEST({column} - 1, 0)
+            WHERE user_id=%s
+            """,
+            (user_id,)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        print("ERROR in refund_feature:", repr(e))
         return jsonify({"ok": False, "msg": "Something went wrong."}), 500
 # ============================================================
 
