@@ -2141,6 +2141,10 @@ def init_db():
             ADD COLUMN IF NOT EXISTS grace_feature_used BOOLEAN NOT NULL DEFAULT FALSE
             """
         )
+        c.execute("""
+            ALTER TABLE usage_limits_v2
+            ADD COLUMN IF NOT EXISTS grace_started BOOLEAN NOT NULL DEFAULT FALSE
+        """)
         conn.commit()
         conn.close()
 
@@ -2986,7 +2990,8 @@ def check_heavy_limit():
             c.execute(
                 """
                 UPDATE usage_limits_v2
-                SET heavy_count=%s, heavy_locked_until=%s, daily_reset_time=%s
+                SET heavy_count=%s, heavy_locked_until=%s, daily_reset_time=%s,
+                    grace_text_count=0, grace_feature_used=FALSE, grace_started=FALSE
                 WHERE user_id=%s
                 """,
                 (new_count, lock_until, daily_reset_time, user_id)
@@ -3390,6 +3395,116 @@ def check_grace_feature():
     except Exception as e:
         print("ERROR in check_grace_feature:", repr(e))
         return jsonify({"ok": False, "msg": "Something went wrong."}), 500
+
+@app.route("/usage_status", methods=["GET"])
+def usage_status():
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    user_id = g.user_id
+
+    if user_id in DEVELOPER_USER_IDS:
+        return jsonify({
+            "ok": True, "locked": False, "grace_started": False,
+            "heavy_remaining": 999, "locked_seconds": 0,
+            "grace_text_remaining": 3, "grace_feature_available": True,
+        })
+
+    conn = None
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        now = datetime.datetime.now()
+
+        c.execute(
+            """
+            SELECT heavy_count, heavy_locked_until,
+                   grace_text_count, grace_feature_used, grace_started
+            FROM usage_limits_v2
+            WHERE user_id=%s
+            """,
+            (user_id,)
+        )
+        row = c.fetchone()
+
+        if row is None:
+            return jsonify({
+                "ok": True, "locked": False, "grace_started": False,
+                "heavy_remaining": HEAVY_LIMIT, "locked_seconds": 0,
+                "grace_text_remaining": GRACE_TEXT_LIMIT,
+                "grace_feature_available": True,
+            })
+
+        heavy_count, locked_until, g_text, g_feat, g_started = row
+        locked = locked_until is not None and now < locked_until
+
+        # القفل انتهى: نظّف كل شي
+        if locked_until is not None and not locked:
+            c.execute(
+                """
+                UPDATE usage_limits_v2
+                SET heavy_count=0, heavy_locked_until=NULL,
+                    grace_text_count=0, grace_feature_used=FALSE,
+                    grace_started=FALSE
+                WHERE user_id=%s
+                """,
+                (user_id,)
+            )
+            conn.commit()
+            heavy_count, g_text, g_feat, g_started = 0, 0, False, False
+
+        seconds = int((locked_until - now).total_seconds()) if locked else 0
+
+        return jsonify({
+            "ok": True,
+            "locked": locked,
+            "locked_seconds": max(seconds, 0),
+            "grace_started": bool(g_started and locked),
+            "heavy_remaining": max(HEAVY_LIMIT - heavy_count, 0),
+            "grace_text_remaining": max(GRACE_TEXT_LIMIT - g_text, 0),
+            "grace_feature_available": not g_feat,
+        })
+
+    except Exception as e:
+        print("ERROR in usage_status:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route("/start_grace", methods=["POST"])
+def start_grace():
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    conn = None
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute(
+            """
+            UPDATE usage_limits_v2
+            SET grace_started=TRUE
+            WHERE user_id=%s AND heavy_locked_until > %s
+            """,
+            (g.user_id, datetime.datetime.now())
+        )
+        conn.commit()
+
+        if c.rowcount == 0:
+            return jsonify({"ok": False, "msg": "App is not locked."}), 400
+
+        return jsonify({"ok": True})
+
+    except Exception as e:
+        print("ERROR in start_grace:", repr(e))
+        return jsonify({"ok": False, "msg": "Something went wrong."}), 500
+    finally:
+        if conn:
+            conn.close()
 if __name__ == "__main__":
 
     port = int(
