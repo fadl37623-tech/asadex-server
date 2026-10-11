@@ -675,7 +675,7 @@ import unicodedata
 # Cache settings
 # ------------------------------------------------------------
 
-CACHE_VERSION = "v1"
+CACHE_VERSION = "v2"
 CACHE_MODEL = "gemini-2.5-flash"
 CACHE_TTL_DAYS = 30
 
