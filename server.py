@@ -3505,6 +3505,169 @@ def start_grace():
     finally:
         if conn:
             conn.close()
+
+# ============================================================
+# حد قسم الدراسة (الخطة + الاختبارات) - منفصل عن حد المحادثة
+# ============================================================
+
+PLAN_LIMIT = 4            # عدد الاستخدامات
+PLAN_WINDOW_HOURS = 6     # مدة القفل
+
+
+def ensure_plan_limits_table():
+    conn = None
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plan_limits (
+                user_id INTEGER PRIMARY KEY,
+                use_count INTEGER NOT NULL DEFAULT 0,
+                window_start TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        conn.commit()
+    except Exception as e:
+        print("plan_limits table error:", repr(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+ensure_plan_limits_table()
+
+
+def _plan_current(c, user_id, now):
+    """يرجع (count, window_start) مع تصفير النافذة المنتهية."""
+    c.execute(
+        "SELECT use_count, window_start FROM plan_limits WHERE user_id=%s",
+        (user_id,),
+    )
+    row = c.fetchone()
+    if row is None:
+        return 0, now
+    count, start = row
+    if now - start >= datetime.timedelta(hours=PLAN_WINDOW_HOURS):
+        return 0, now
+    return count, start
+
+
+@app.route("/check_plan_limit", methods=["POST"])
+def check_plan_limit():
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    user_id = g.user_id
+    if user_id in DEVELOPER_USER_IDS:
+        return jsonify({"allowed": True, "remaining": 999,
+                        "locked_seconds": 0, "msg": ""})
+
+    conn = None
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        now = datetime.datetime.now()
+
+        count, start = _plan_current(c, user_id, now)
+        unlock_at = start + datetime.timedelta(hours=PLAN_WINDOW_HOURS)
+        seconds_left = max(int((unlock_at - now).total_seconds()), 0)
+
+        if count >= PLAN_LIMIT:
+            return jsonify({"allowed": False, "remaining": 0,
+                            "locked_seconds": seconds_left,
+                            "msg": "Study limit reached."})
+
+        new_count = count + 1
+        c.execute(
+            """
+            INSERT INTO plan_limits (user_id, use_count, window_start)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE
+            SET use_count=EXCLUDED.use_count,
+                window_start=EXCLUDED.window_start
+            """,
+            (user_id, new_count, start),
+        )
+        conn.commit()
+
+        remaining = PLAN_LIMIT - new_count
+        return jsonify({
+            "allowed": True,
+            "remaining": remaining,
+            "locked_seconds": seconds_left if remaining == 0 else 0,
+            "msg": "",
+        })
+
+    except Exception as e:
+        print("ERROR in check_plan_limit:", repr(e))
+        return jsonify({"allowed": False, "remaining": 0,
+                        "locked_seconds": 0, "msg": "Something went wrong."}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route("/refund_plan_use", methods=["POST"])
+def refund_plan_use():
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    conn = None
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute(
+            """
+            UPDATE plan_limits
+            SET use_count = GREATEST(use_count - 1, 0)
+            WHERE user_id=%s
+            """,
+            (g.user_id,),
+        )
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        print("ERROR in refund_plan_use:", repr(e))
+        return jsonify({"ok": False}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route("/plan_status", methods=["GET"])
+def plan_status():
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    if g.user_id in DEVELOPER_USER_IDS:
+        return jsonify({"ok": True, "locked": False,
+                        "locked_seconds": 0, "remaining": 999})
+    conn = None
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        now = datetime.datetime.now()
+        count, start = _plan_current(c, g.user_id, now)
+        unlock_at = start + datetime.timedelta(hours=PLAN_WINDOW_HOURS)
+        seconds_left = max(int((unlock_at - now).total_seconds()), 0)
+        locked = count >= PLAN_LIMIT
+        return jsonify({
+            "ok": True,
+            "locked": locked,
+            "locked_seconds": seconds_left if locked else 0,
+            "remaining": max(PLAN_LIMIT - count, 0),
+        })
+    except Exception as e:
+        print("ERROR in plan_status:", repr(e))
+        return jsonify({"ok": False}), 500
+    finally:
+        if conn:
+            conn.close()
 if __name__ == "__main__":
 
     port = int(
