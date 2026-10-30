@@ -893,6 +893,48 @@ def init_ai_system_tables():
             """
         )
 
+        # ----------------------------------------------------
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS answer_feedback (
+                id BIGSERIAL PRIMARY KEY,
+
+                user_id INTEGER NOT NULL,
+
+                answer_id TEXT NOT NULL,
+
+                rating SMALLINT NOT NULL
+                    CHECK (rating IN (-1, 1)),
+
+                reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+                comment TEXT,
+
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+                UNIQUE (user_id, answer_id)
+            )
+            """
+        )
+
+        c.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            answer_feedback_user_index
+            ON answer_feedback(user_id)
+            """
+        )
+
+        c.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            answer_feedback_rating_index
+            ON answer_feedback(rating)
+            """
+        )
         conn.commit()
 
         print(
@@ -2835,6 +2877,147 @@ def submit_feedback():
             "msg": str(e)
         }), 500
 
+# ============================================================
+# Answer Feedback
+# ============================================================
+
+@app.route(
+    "/answer-feedback",
+    methods=["POST"]
+)
+def submit_answer_feedback():
+
+    auth_error = require_auth()
+    if auth_error:
+        return auth_error
+
+    data = request.get_json(silent=True) or {}
+
+    answer_id = data.get("answer_id")
+    rating = data.get("rating")
+    reasons = data.get("reasons", [])
+    comment = data.get("comment", "")
+
+    # --------------------------------------------------------
+
+    if not isinstance(answer_id, str) or not answer_id.strip():
+        return jsonify({
+            "ok": False,
+            "msg": "Invalid answer_id."
+        }), 400
+
+    answer_id = answer_id.strip()
+
+    if len(answer_id) > 100:
+        return jsonify({
+            "ok": False,
+            "msg": "answer_id is too long."
+        }), 400
+
+    if isinstance(rating, bool) or rating not in (1, -1):
+        return jsonify({
+            "ok": False,
+            "msg": "Rating must be 1 or -1."
+        }), 400
+
+    if not isinstance(reasons, list):
+        return jsonify({
+            "ok": False,
+            "msg": "Reasons must be a list."
+        }), 400
+
+    if len(reasons) > 10 or not all(
+        isinstance(reason, str) and 0 < len(reason.strip()) <= 100
+        for reason in reasons
+    ):
+        return jsonify({
+            "ok": False,
+            "msg": "Invalid feedback reasons."
+        }), 400
+
+    if not isinstance(comment, str):
+        return jsonify({
+            "ok": False,
+            "msg": "Invalid comment."
+        }), 400
+
+    comment = comment.strip()
+
+    if len(comment) > 2000:
+        return jsonify({
+            "ok": False,
+            "msg": "Comment is too long."
+        }), 400
+
+    # --------------------------------------------------------
+
+    conn = None
+
+    try:
+
+        conn = get_conn()
+        c = conn.cursor()
+
+        c.execute(
+            """
+            INSERT INTO answer_feedback
+            (
+                user_id,
+                answer_id,
+                rating,
+                reasons,
+                comment
+            )
+            VALUES (%s, %s, %s, %s::jsonb, %s)
+
+            ON CONFLICT (user_id, answer_id)
+            DO UPDATE SET
+
+                rating = EXCLUDED.rating,
+                reasons = EXCLUDED.reasons,
+                comment = EXCLUDED.comment,
+                updated_at = NOW()
+
+            RETURNING id
+            """,
+            (
+                g.user_id,
+                answer_id,
+                rating,
+                json.dumps(reasons, ensure_ascii=False),
+                comment or None
+            )
+        )
+
+        feedback_id = c.fetchone()[0]
+
+        conn.commit()
+
+        return jsonify({
+            "ok": True,
+            "msg": "Answer feedback saved successfully.",
+            "feedback_id": feedback_id
+        })
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        print(
+            "ERROR in submit_answer_feedback:",
+            repr(e)
+        )
+
+        return jsonify({
+            "ok": False,
+            "msg": "Could not save answer feedback."
+        }), 500
+
+    finally:
+
+        if conn:
+            conn.close()
 
 # ============================================================
 # Android Google OAuth callback
