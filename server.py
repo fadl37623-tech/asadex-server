@@ -2072,11 +2072,83 @@ def google_mobile_exchange():
             "msg": str(e)
         }), 500
 
+# ============================================================
+# Native Google sign-in (id_token) - bottom sheet on Android
+# ============================================================
 
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
+
+GOOGLE_NATIVE_AUDIENCE = (
+    "655529578568-4pcn5v2a1v5et8b74e6jrh8639du4u3d"
+    ".apps.googleusercontent.com"
+)
+
+
+@app.route("/google/native-login", methods=["POST"])
+@limiter.limit("20 per minute")
+def google_native_login():
+
+    data = request.json or {}
+    token_str = data.get("id_token")
+
+    if not token_str:
+        return jsonify({
+            "ok": False,
+            "msg": "Missing id_token"
+        }), 400
+
+    try:
+        info = google_id_token.verify_oauth2_token(
+            token_str,
+            google_requests.Request(),
+            GOOGLE_NATIVE_AUDIENCE,
+        )
+
+        google_id = str(info.get("sub", "")).strip()
+        email = str(info.get("email", "")).strip().lower()
+        name = str(info.get("name", "")).strip()
+
+        if (
+            not google_id
+            or not validate_email(email)
+            or not info.get("email_verified", False)
+        ):
+            return jsonify({
+                "ok": False,
+                "msg": "Invalid Google account data"
+            }), 400
+
+        if not name:
+            name = email.split("@")[0]
+
+        user = upsert_google_user(google_id, email, name)
+
+        token = create_auth_token(int(user[0]))
+
+        return jsonify({
+            "ok": True,
+            "user": user,
+            "token": token,
+            "msg": ""
+        })
+
+    except ValueError as e:
+        print("Native Google token invalid:", e)
+        return jsonify({
+            "ok": False,
+            "msg": "Invalid Google token"
+        }), 401
+
+    except Exception as e:
+        print("Native Google login error:", e)
+        return jsonify({
+            "ok": False,
+            "msg": "Google sign-in failed"
+        }), 500
 # ============================================================
 # Initialize database
 # ============================================================
-
 
 @app.route(
     "/init",
