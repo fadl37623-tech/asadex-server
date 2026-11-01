@@ -2079,11 +2079,10 @@ def google_mobile_exchange():
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 
-GOOGLE_NATIVE_AUDIENCE = (
-    "655529578568-4pcn5v2a1v5et8b74e6jrh8639du4u3d"
-    ".apps.googleusercontent.com"
-)
-
+GOOGLE_NATIVE_AUDIENCE = [
+    "655529578568-4pcn5v2a1v5et8b74e6jrh8639du4u3d.apps.googleusercontent.com",
+    "655529578568-9q2tikakj1gdm7uf5borfonuk976je3s.apps.googleusercontent.com",
+]
 
 @app.route("/google/native-login", methods=["POST"])
 @limiter.limit("20 per minute")
