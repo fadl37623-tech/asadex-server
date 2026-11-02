@@ -3040,15 +3040,8 @@ def submit_answer_feedback():
                 comment
             )
             VALUES (%s, %s, %s, %s::jsonb, %s)
-
             ON CONFLICT (user_id, answer_id)
-            DO UPDATE SET
-
-                rating = EXCLUDED.rating,
-                reasons = EXCLUDED.reasons,
-                comment = EXCLUDED.comment,
-                updated_at = NOW()
-
+            DO NOTHING
             RETURNING id
             """,
             (
@@ -3060,8 +3053,17 @@ def submit_answer_feedback():
             )
         )
 
-        feedback_id = c.fetchone()[0]
+        row = c.fetchone()
 
+        if row is None:
+            conn.rollback()
+            return jsonify({
+                "ok": False,
+                "msg": "You have already rated this answer.",
+                "already_rated": True
+            }), 409
+
+        feedback_id = row[0]
         conn.commit()
 
         return jsonify({
