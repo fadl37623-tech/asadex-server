@@ -1465,101 +1465,197 @@ def text_to_speech():
 def analytics_summary():
 
     secret = request.args.get("key", "")
-    expected = os.environ.get("ANALYTICS_KEY")
+    expected = os.environ.get("ANALYTICS_KEY", "")
 
-    if not expected or not secrets.compare_digest(secret.encode("utf-8"), expected.encode("utf-8")):
-        return jsonify({"ok": False, "msg": "Unauthorized"}), 403
-    
+    if (
+        not expected
+        or not secrets.compare_digest(
+            secret.encode("utf-8"),
+            expected.encode("utf-8")
+        )
+    ):
+        return jsonify({
+            "ok": False,
+            "msg": "Unauthorized"
+        }), 403
+
     conn = None
 
     try:
-
         conn = get_conn()
         c = conn.cursor()
-        
+
+        # ----------------------------------------------------
         # Total questions
-        c.execute(
-            """
+        # ----------------------------------------------------
+
+        c.execute("""
             SELECT COUNT(*)
             FROM analytics_events
-            WHERE event_type='question'
-            """
-        )
+            WHERE event_type = 'question'
+        """)
 
-        total_questions = c.fetchone()[0]
+        total_questions = c.fetchone()[0] or 0
 
-        # Cache hits
-        c.execute(
-            """
-            SELECT COUNT(*)
+        # ----------------------------------------------------
+        # Cache statistics
+        # ----------------------------------------------------
+
+        c.execute("""
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE event_type = 'cache_hit'
+                ),
+                COUNT(*) FILTER (
+                    WHERE event_type = 'cache_miss'
+                )
             FROM analytics_events
-            WHERE event_type='cache_hit'
-            """
+            WHERE event_type IN (
+                'cache_hit',
+                'cache_miss'
+            )
+        """)
+
+        cache_hits, cache_misses = c.fetchone()
+
+        cache_hits = cache_hits or 0
+        cache_misses = cache_misses or 0
+
+        total_cache_checks = cache_hits + cache_misses
+
+        cache_hit_rate = (
+            cache_hits / total_cache_checks * 100
+            if total_cache_checks
+            else 0
         )
 
-        cache_hits = c.fetchone()[0]
+        # ----------------------------------------------------
 
-        # Cache misses
-        c.execute(
-            """
-            SELECT COUNT(*)
+        c.execute("""
+            SELECT
+                COUNT(*),
+                AVG(response_time_ms)
             FROM analytics_events
-            WHERE event_type='cache_miss'
-            """
-        )
+            WHERE event_type = 'api_call'
+              AND success = TRUE
+              AND response_time_ms IS NOT NULL
+        """)
 
-        cache_misses = c.fetchone()[0]
+        api_calls, avg_response = c.fetchone()
 
-        # API calls
-        c.execute(
-            """
-            SELECT COUNT(*)
-            FROM analytics_events
-            WHERE event_type='api_call'
-            """
-        )
+        api_calls = api_calls or 0
 
-        api_calls = c.fetchone()[0]
+        # ----------------------------------------------------
 
-        # Average response time
-        c.execute(
-            """
-            SELECT AVG(response_time_ms)
-            FROM analytics_events
-            WHERE event_type='api_call'
-            AND success=TRUE
-            AND response_time_ms IS NOT NULL
-            """
-        )
-
-        avg_response = c.fetchone()[0]
-
-        # Feedback
-        c.execute(
-            """
+        c.execute("""
             SELECT
                 COUNT(*),
                 AVG(rating)
             FROM feedback
-            """
-        )
+        """)
 
-        feedback_count, average_rating = (
-            c.fetchone()
-        )
+        feedback_count, average_rating = c.fetchone()
 
-        total_cache_checks = (
-            cache_hits + cache_misses
-        )
+        feedback_count = feedback_count or 0
 
-        cache_hit_rate = (
-            (
-                cache_hits
-                / total_cache_checks
-            ) * 100
-            if total_cache_checks
+        # ----------------------------------------------------
+
+        c.execute("""
+            SELECT
+                COUNT(*),
+                COUNT(*) FILTER (WHERE rating = 1),
+                COUNT(*) FILTER (WHERE rating = -1),
+                AVG(rating)
+            FROM answer_feedback
+        """)
+
+        (
+            answer_feedback_count,
+            positive_count,
+            negative_count,
+            answer_average_rating
+        ) = c.fetchone()
+
+        answer_feedback_count = answer_feedback_count or 0
+        positive_count = positive_count or 0
+        negative_count = negative_count or 0
+
+        positive_percent = (
+            positive_count / answer_feedback_count * 100
+            if answer_feedback_count
             else 0
         )
+
+        negative_percent = (
+            negative_count / answer_feedback_count * 100
+            if answer_feedback_count
+            else 0
+        )
+
+        # ----------------------------------------------------
+        
+        c.execute("""
+            SELECT
+                rating,
+                reason,
+                COUNT(*) AS reason_count
+            FROM answer_feedback
+            CROSS JOIN LATERAL
+                jsonb_array_elements_text(reasons) AS reason
+            WHERE jsonb_typeof(reasons) = 'array'
+            GROUP BY rating, reason
+            ORDER BY reason_count DESC, reason ASC
+        """)
+
+        reason_rows = c.fetchall()
+
+        positive_reasons = []
+        negative_reasons = []
+
+        for rating, reason, reason_count in reason_rows:
+
+            item = {
+                "reason": reason,
+                "count": reason_count
+            }
+
+            if rating == 1:
+                positive_reasons.append(item)
+
+            elif rating == -1:
+                negative_reasons.append(item)
+
+        # ----------------------------------------------------
+
+        c.execute("""
+            SELECT
+                rating,
+                comment,
+                created_at
+            FROM answer_feedback
+            WHERE comment IS NOT NULL
+              AND BTRIM(comment) <> ''
+            ORDER BY created_at DESC
+            LIMIT 10
+        """)
+
+        comment_rows = c.fetchall()
+
+        recent_comments = []
+
+        for rating, comment, created_at in comment_rows:
+
+            recent_comments.append({
+                "rating": rating,
+                "comment": comment,
+                "created_at": created_at.isoformat()
+                if created_at
+                else None
+            })
+
+        # ----------------------------------------------------
+        # Response
+        # ----------------------------------------------------
 
         return jsonify({
             "ok": True,
@@ -1577,30 +1673,57 @@ def analytics_summary():
 
             "api_calls": api_calls,
 
-            "average_response_time_ms": (
-                round(avg_response, 2)
-                if avg_response is not None
-                else 0
-            ),
+            "average_response_time_ms": round(
+                float(avg_response),
+                2
+            ) if avg_response is not None else 0,
 
             "feedback": {
                 "count": feedback_count,
-                "average_rating": (
-                    round(
-                        float(average_rating),
-                        2
-                    )
-                    if average_rating is not None
-                    else 0
-                )
+                "average_rating": round(
+                    float(average_rating),
+                    2
+                ) if average_rating is not None else 0
+            },
+
+            "answer_feedback": {
+                "total": answer_feedback_count,
+
+                "positive": positive_count,
+                "negative": negative_count,
+
+                "positive_percent": round(
+                    positive_percent,
+                    2
+                ),
+
+                "negative_percent": round(
+                    negative_percent,
+                    2
+                ),
+
+                "average_rating": round(
+                    float(answer_average_rating),
+                    2
+                ) if answer_average_rating is not None else 0,
+
+                "positive_reasons": positive_reasons,
+                "negative_reasons": negative_reasons,
+
+                "recent_comments": recent_comments
             }
         })
 
     except Exception as e:
 
+        print(
+            "Analytics summary error:",
+            repr(e)
+        )
+
         return jsonify({
             "ok": False,
-            "msg": str(e)
+            "msg": "Could not load analytics summary."
         }), 500
 
     finally:
