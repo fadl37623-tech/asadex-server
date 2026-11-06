@@ -197,142 +197,46 @@ def ai_generate():
     auth_error = require_auth()
     if auth_error:
         return auth_error
-
     try:
         import time
-        
         server_total_start = time.perf_counter()
-        
         data = request.json or {}
-
         contents = data.get("contents")
         prompt = data.get("prompt")
         system_instruction = data.get("system_instruction")
         thinking_budget = data.get("thinking_budget")
         google_search = data.get("google_search", False)
 
-        # دعم الطلب النصي البسيط
         if contents is None:
             if not prompt:
-                return jsonify({
-                    "ok": False,
-                    "error": "prompt is required"
-                }), 400
-
+                return jsonify({"ok": False, "error": "prompt is required"}), 400
             contents = prompt
 
-        import_start = time.perf_counter()
-
-        import_time_ms = round(
-            (time.perf_counter() - import_start) * 1000,
-            2
-        )
-
-        print(
-            f"SERVER GOOGLE IMPORT TIME: {import_time_ms} ms"
-        )
-
-        client_start = time.perf_counter()
-
+        # ─── التعديل هنا: إضافة http_options لاستخدام v1beta ───
         client = genai.Client(
-            api_key=GEMINI_API_KEY
+            api_key=GEMINI_API_KEY,
+            http_options={'api_version': 'v1beta'}
         )
-
-        client_time_ms = round(
-            (time.perf_counter() - client_start) * 1000,
-            2
-        )
-
-        print(
-            f"SERVER CLIENT INIT TIME: {client_time_ms} ms"
-        )
-
-        config_start = time.perf_counter()
 
         config_kwargs = {}
-
         if system_instruction:
             config_kwargs["system_instruction"] = system_instruction
-
         if thinking_budget is not None:
-            config_kwargs["thinking_config"] = (
-                types.ThinkingConfig(
-                    thinking_budget=int(thinking_budget)
-                )
+            config_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_budget=int(thinking_budget)
             )
-
         if google_search:
-            config_kwargs["tools"] = [
-                types.Tool(
-                    google_search=types.GoogleSearch()
-                )
-            ]
+            config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
 
-        if config_kwargs:
-            config = types.GenerateContentConfig(
-                **config_kwargs
-            )
-        else:
-            config = None
-
-        config_time_ms = round(
-            (time.perf_counter() - config_start) * 1000,
-            2
-        )
-
-        print(
-            f"SERVER CONFIG BUILD TIME: {config_time_ms} ms"
-        )
-
-        if system_instruction:
-            config_kwargs["system_instruction"] = system_instruction
-
-        if thinking_budget is not None:
-            config_kwargs["thinking_config"] = (
-                types.ThinkingConfig(
-                    thinking_budget=int(thinking_budget)
-                )
-            )
-        # --------------------------------------------------------
-        # Google Search Grounding
-        # --------------------------------------------------------
-
-        if google_search:
-            config_kwargs["tools"] = [
-                types.Tool(
-                    google_search=types.GoogleSearch()
-                )
-            ]
-
-        if config_kwargs:
-            config = types.GenerateContentConfig(
-                **config_kwargs
-            )
-        else:
-            config = None
-        config_ready_time = round(
-            (time.perf_counter() - server_total_start) * 1000,
-            2
-        )
-
-        print(
-            f"SERVER CONFIG READY TIME: {config_ready_time} ms"
-        )
+        config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
 
         # --------------------------------------------------------
         # Gemini request with retry
         # --------------------------------------------------------
-
         max_attempts = 3
-
         for attempt in range(1, max_attempts + 1):
             try:
-                print(
-                    f"AI GENERATE ATTEMPT {attempt}/{max_attempts}"
-                )
-
                 gemini_start = time.perf_counter()
-
                 if config is not None:
                     response = client.models.generate_content(
                         model="gemini-2.5-flash",
@@ -344,117 +248,37 @@ def ai_generate():
                         model="gemini-2.5-flash",
                         contents=contents,
                     )
-
-                gemini_time_ms = round(
-                    (time.perf_counter() - gemini_start) * 1000,
-                    2
-                )
-
-                print(
-                    f"GEMINI REQUEST TIME: {gemini_time_ms} ms"
-                )
-
-                print(
-                    f"AI GENERATE SUCCESS ON ATTEMPT {attempt}"
-                )
-                # ------------------------------------------------
-                # استخراج مصادر Google Search Grounding
-                # ------------------------------------------------
-                post_gemini_start = time.perf_counter()
+                
+                answer_text = response.text
+                
+                # استخراج مصادر Google Search Grounding إن وجدت
                 grounding_sources = []
-
                 if google_search:
                     try:
-                        for candidate in (
-                            getattr(response, "candidates", None) or []
-                        ):
-                            grounding_metadata = getattr(
-                                candidate,
-                                "grounding_metadata",
-                                None
-                            )
-
+                        for candidate in (getattr(response, "candidates", None) or []):
+                            grounding_metadata = getattr(candidate, "grounding_metadata", None)
                             if not grounding_metadata:
                                 continue
-
-                            grounding_chunks = getattr(
-                                grounding_metadata,
-                                "grounding_chunks",
-                                None
-                            ) or []
-
+                            grounding_chunks = getattr(grounding_metadata, "grounding_chunks", None) or []
                             for chunk in grounding_chunks:
-                                web = getattr(
-                                    chunk,
-                                    "web",
-                                    None
-                                )
-
+                                web = getattr(chunk, "web", None)
                                 if not web:
                                     continue
-                                uri = getattr(
-                                    web,
-                                    "uri",
-                                    None
-                                )
-
-                                title = getattr(
-                                    web,
-                                    "title",
-                                    None
-                                )
-
+                                uri = getattr(web, "uri", None)
+                                title = getattr(web, "title", None)
                                 if uri:
-                                    grounding_sources.append({
-                                        "url": uri,
-                                        "title": title or ""
-                                    })
-
+                                    grounding_sources.append({"url": uri, "title": title or ""})
                     except Exception as source_error:
-                        print(
-                            "GROUNDING SOURCE EXTRACTION ERROR:",
-                            repr(source_error)
-                        )
-                        grounding_time_ms = round(
-                            (time.perf_counter() - post_gemini_start) * 1000,
-                            2
-                        )
+                        print("GROUNDING SOURCE EXTRACTION ERROR:", repr(source_error))
 
-                        print(
-                            f"GROUNDING EXTRACTION TIME: {grounding_time_ms} ms"
-                        )
-                # إزالة المصادر المكررة
                 unique_sources = []
                 seen_urls = set()
-
                 for source in grounding_sources:
                     url = source.get("url")
-
-                    if not url:
+                    if not url or url in seen_urls:
                         continue
-
-                    if url in seen_urls:
-                        continue
-
                     seen_urls.add(url)
                     unique_sources.append(source)
-
-                # ------------------------------------------------
-                # Response
-                # ------------------------------------------------
-
-                answer_start = time.perf_counter()
-
-                answer_text = response.text
-
-                answer_time_ms = round(
-                    (time.perf_counter() - answer_start) * 1000,
-                    2
-                )
-
-                print(
-                    f"RESPONSE TEXT TIME: {answer_time_ms} ms"
-                )
 
                 result = {
                     "ok": True,
@@ -463,74 +287,34 @@ def ai_generate():
                 if google_search:
                     result["grounding_sources"] = unique_sources
 
-                    print(
-                        "GROUNDING SOURCES FOUND:",
-                        len(unique_sources)
-                    )
-
-                server_total_time_ms = round(
-                    (time.perf_counter() - server_total_start) * 1000,
-                    2
-                )
-
-                print(
-                    f"SERVER TOTAL AI TIME: "
-                    f"{server_total_time_ms} ms"
-                )
-
                 return jsonify(result)
-
             except Exception as e:
                 error_text = str(e)
-
-                print(
-                    f"AI GENERATE ATTEMPT {attempt} ERROR:",
-                    repr(e)
-                )
-
-                # Retry only temporary availability/rate-limit errors
+                print(f"AI GENERATE ATTEMPT {attempt} ERROR:", repr(e))
                 temporary_error = (
-                    "503" in error_text
-                    or "UNAVAILABLE" in error_text
-                    or "429" in error_text
-                    or "RESOURCE_EXHAUSTED" in error_text
+                    "503" in error_text or "UNAVAILABLE" in error_text or 
+                    "429" in error_text or "RESOURCE_EXHAUSTED" in error_text
                 )
-
-                if not temporary_error:
+                if not temporary_error or attempt >= max_attempts:
                     raise
-
-                if attempt < max_attempts:
-                    wait_seconds = 2 * (attempt - 1)
-
-                    print(
-                        f"AI GENERATE RETRYING IN "
-                        f"{wait_seconds} SECONDS..."
-                    )
-
-                    time.sleep(wait_seconds)
-                else:
-                    raise
+                time.sleep(2 * (attempt - 1))
 
     except Exception as e:
         print("AI GENERATE ERROR:", repr(e))
+        return jsonify({"ok": False, "error": "Something went wrong."}), 500
 
-        return jsonify({
-            "ok": False,
-            "error": "Something went wrong."
-        }), 500
 
 @app.route("/ai/generate-stream", methods=["POST"])
 def ai_generate_stream():
     auth_error = require_auth()
     if auth_error:
         return auth_error
-
     data = request.json or {}
     contents = data.get("contents")
     prompt = data.get("prompt")
     system_instruction = data.get("system_instruction")
     thinking_budget = data.get("thinking_budget")
-
+    
     if contents is None:
         if not prompt:
             return jsonify({"ok": False, "error": "prompt is required"}), 400
@@ -538,8 +322,12 @@ def ai_generate_stream():
 
     def generate():
         try:
-            client = genai.Client(api_key=GEMINI_API_KEY)
-
+            # ─── التعديل هنا أيضاً: إضافة http_options لاستخدام v1beta ───
+            client = genai.Client(
+                api_key=GEMINI_API_KEY,
+                http_options={'api_version': 'v1beta'}
+            )
+            
             config_kwargs = {}
             if system_instruction:
                 config_kwargs["system_instruction"] = system_instruction
@@ -547,7 +335,7 @@ def ai_generate_stream():
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
                     thinking_budget=int(thinking_budget)
                 )
-
+            
             config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
 
             stream = client.models.generate_content_stream(
@@ -558,12 +346,11 @@ def ai_generate_stream():
                 model="gemini-2.5-flash",
                 contents=contents,
             )
-
+            
             for chunk in stream:
                 text = getattr(chunk, "text", None)
                 if text:
                     yield text
-
         except Exception as e:
             print("STREAM ERROR:", repr(e))
             yield f"\n\n[ERROR: {str(e)}]"
@@ -572,7 +359,7 @@ def ai_generate_stream():
         stream_with_context(generate()),
         mimetype="text/plain",
     )
-
+       
 # ============================================================
 # Google OAuth
 # ============================================================
