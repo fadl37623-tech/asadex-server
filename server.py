@@ -3142,7 +3142,17 @@ def submit_answer_feedback():
             "ok": False,
             "msg": "Comment is too long."
         }), 400
+    
+    feature = data.get("feature", "chat")
+    if feature not in ("chat", "report", "quiz", "plan"):
+        return jsonify({"ok": False, "msg": "Invalid feature."}), 400
 
+    context = data.get("context") or {}
+    if not isinstance(context, dict):
+        return jsonify({"ok": False, "msg": "Invalid context."}), 400
+    context_json = json.dumps(context, ensure_ascii=False)
+    if len(context_json) > 20000:
+        return jsonify({"ok": False, "msg": "Context too large."}), 400
     # --------------------------------------------------------
 
     conn = None
@@ -3155,24 +3165,16 @@ def submit_answer_feedback():
         c.execute(
             """
             INSERT INTO answer_feedback
-            (
-                user_id,
-                answer_id,
-                rating,
-                reasons,
-                comment
-            )
-            VALUES (%s, %s, %s, %s::jsonb, %s)
+            (user_id, answer_id, rating, reasons, comment, feature, context)
+            VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s::jsonb)
             ON CONFLICT (user_id, answer_id)
             DO NOTHING
             RETURNING id
             """,
             (
-                g.user_id,
-                answer_id,
-                rating,
+                g.user_id, answer_id, rating,
                 json.dumps(reasons, ensure_ascii=False),
-                comment or None
+                comment or None, feature, context_json
             )
         )
 
@@ -4047,6 +4049,24 @@ def plan_status():
     finally:
         if conn:
             conn.close()
+
+def ensure_feedback_feature_columns():
+    conn = None
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("ALTER TABLE answer_feedback ADD COLUMN IF NOT EXISTS feature TEXT NOT NULL DEFAULT 'chat'")
+        c.execute("ALTER TABLE answer_feedback ADD COLUMN IF NOT EXISTS context JSONB")
+        c.execute("CREATE INDEX IF NOT EXISTS answer_feedback_feature_index ON answer_feedback(feature)")
+        conn.commit()
+    except Exception as e:
+        print("feedback columns error:", repr(e))
+    finally:
+        if conn:
+            conn.close()
+
+ensure_feedback_feature_columns()
+
 if __name__ == "__main__":
 
     port = int(
