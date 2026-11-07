@@ -706,6 +706,16 @@ def init_ai_system_tables():
             )
             """
         )
+        
+        c.execute("""
+            ALTER TABLE answer_feedback
+            ADD COLUMN IF NOT EXISTS feature TEXT NOT NULL DEFAULT 'chat'
+        """)
+
+        c.execute("""
+            ALTER TABLE answer_feedback
+            ADD COLUMN IF NOT EXISTS context JSONB NOT NULL DEFAULT '{}'::jsonb
+        """)
 
         c.execute(
             """
@@ -1349,6 +1359,38 @@ def analytics_summary():
 
         c.execute("""
             SELECT
+                feature,
+                COUNT(*),
+                COUNT(*) FILTER (WHERE rating = 1),
+                COUNT(*) FILTER (WHERE rating = -1),
+                AVG(rating)
+            FROM answer_feedback
+            GROUP BY feature
+        """)
+
+        feature_rows = c.fetchall()
+
+        answer_feedback_by_feature = {}
+
+        for feature, total, positive, negative, average in feature_rows:
+
+            answer_feedback_by_feature[feature] = {
+                "total": total,
+                "positive": positive,
+                "negative": negative,
+                "positive_percent": round(
+                    positive / total * 100, 2
+                ) if total else 0,
+                "negative_percent": round(
+                    negative / total * 100, 2
+                ) if total else 0,
+                "average_rating": round(
+                    float(average), 2
+                ) if average is not None else 0
+            }
+
+        c.execute("""
+            SELECT
                 COUNT(*),
                 COUNT(*) FILTER (WHERE rating = 1),
                 COUNT(*) FILTER (WHERE rating = -1),
@@ -1475,7 +1517,9 @@ def analytics_summary():
 
             "answer_feedback": {
                 "total": answer_feedback_count,
-
+                
+                "by_feature": answer_feedback_by_feature,
+                
                 "positive": positive_count,
                 "negative": negative_count,
 
