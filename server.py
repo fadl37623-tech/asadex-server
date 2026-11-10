@@ -717,6 +717,11 @@ def init_ai_system_tables():
             ADD COLUMN IF NOT EXISTS context JSONB NOT NULL DEFAULT '{}'::jsonb
         """)
 
+        c.execute("""
+            ALTER TABLE answer_feedback
+            ADD COLUMN IF NOT EXISTS app_version TEXT
+        """)
+
         c.execute(
             """
             CREATE INDEX IF NOT EXISTS
@@ -1454,6 +1459,40 @@ def analytics_summary():
             elif rating == -1:
                 negative_reasons.append(item)
 
+          c.execute("""
+            SELECT feature, rating, reason, COUNT(*) AS n
+            FROM answer_feedback
+            CROSS JOIN LATERAL jsonb_array_elements_text(reasons) AS reason
+            WHERE jsonb_typeof(reasons) = 'array'
+            GROUP BY feature, rating, reason
+            ORDER BY n DESC, reason ASC
+        """)
+        for feature, rating, reason, n in c.fetchall():
+            bucket = answer_feedback_by_feature.setdefault(feature, {
+                "total": 0, "positive": 0, "negative": 0,
+                "positive_percent": 0, "negative_percent": 0,
+                "average_rating": 0,
+            })
+            key = "positive_reasons" if rating == 1 else "negative_reasons"
+            bucket.setdefault(key, []).append({"reason": reason, "count": n})
+
+        # ---- حسب نسخة التطبيق ----
+        c.execute("""
+            SELECT COALESCE(app_version, 'unknown'),
+                   COUNT(*),
+                   COUNT(*) FILTER (WHERE rating = 1),
+                   COUNT(*) FILTER (WHERE rating = -1),
+                   AVG(rating)
+            FROM answer_feedback
+            GROUP BY 1
+            ORDER BY 1 DESC
+        """)
+        by_version = {}
+        for ver, total, pos, neg, avg in c.fetchall():
+            by_version[ver] = {
+                "total": total, "positive": pos, "negative": neg,
+                "average_rating": round(float(avg), 2) if avg is not None else 0,
+            }
         # ----------------------------------------------------
 
         c.execute("""
@@ -1519,6 +1558,8 @@ def analytics_summary():
                 "total": answer_feedback_count,
                 
                 "by_feature": answer_feedback_by_feature,
+                "by_feature": answer_feedback_by_feature,
+                "by_version": by_version,
                 
                 "positive": positive_count,
                 "negative": negative_count,
@@ -2984,6 +3025,7 @@ def submit_answer_feedback():
     context_json = json.dumps(context, ensure_ascii=False)
     if len(context_json) > 20000:
         return jsonify({"ok": False, "msg": "Context too large."}), 400
+    app_version = str(data.get("app_version") or "unknown").strip()[:20]
     # --------------------------------------------------------
 
     conn = None
@@ -2996,8 +3038,8 @@ def submit_answer_feedback():
         c.execute(
             """
             INSERT INTO answer_feedback
-            (user_id, answer_id, rating, reasons, comment, feature, context)
-            VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s::jsonb)
+            (user_id, answer_id, rating, reasons, comment, feature, context, app_version)
+            VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s)
             ON CONFLICT (user_id, answer_id)
             DO NOTHING
             RETURNING id
@@ -3005,7 +3047,7 @@ def submit_answer_feedback():
             (
                 g.user_id, answer_id, rating,
                 json.dumps(reasons, ensure_ascii=False),
-                comment or None, feature, context_json
+                comment or None, feature, context_json, app_version
             )
         )
 
@@ -3888,6 +3930,7 @@ def ensure_feedback_feature_columns():
         c = conn.cursor()
         c.execute("ALTER TABLE answer_feedback ADD COLUMN IF NOT EXISTS feature TEXT NOT NULL DEFAULT 'chat'")
         c.execute("ALTER TABLE answer_feedback ADD COLUMN IF NOT EXISTS context JSONB")
+        c.execute("ALTER TABLE answer_feedback ADD COLUMN IF NOT EXISTS app_version TEXT")
         c.execute("CREATE INDEX IF NOT EXISTS answer_feedback_feature_index ON answer_feedback(feature)")
         conn.commit()
     except Exception as e:
