@@ -1459,7 +1459,7 @@ def analytics_summary():
             elif rating == -1:
                 negative_reasons.append(item)
 
-          c.execute("""
+        c.execute("""
             SELECT feature, rating, reason, COUNT(*) AS n
             FROM answer_feedback
             CROSS JOIN LATERAL jsonb_array_elements_text(reasons) AS reason
