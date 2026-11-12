@@ -2964,57 +2964,34 @@ def submit_answer_feedback():
     reasons = data.get("reasons", [])
     comment = data.get("comment", "")
 
-    # --------------------------------------------------------
-
     if not isinstance(answer_id, str) or not answer_id.strip():
-        return jsonify({
-            "ok": False,
-            "msg": "Invalid answer_id."
-        }), 400
+        return jsonify({"ok": False, "msg": "Invalid answer_id."}), 400
 
     answer_id = answer_id.strip()
 
     if len(answer_id) > 100:
-        return jsonify({
-            "ok": False,
-            "msg": "answer_id is too long."
-        }), 400
+        return jsonify({"ok": False, "msg": "answer_id is too long."}), 400
 
     if isinstance(rating, bool) or rating not in (1, -1):
-        return jsonify({
-            "ok": False,
-            "msg": "Rating must be 1 or -1."
-        }), 400
+        return jsonify({"ok": False, "msg": "Rating must be 1 or -1."}), 400
 
     if not isinstance(reasons, list):
-        return jsonify({
-            "ok": False,
-            "msg": "Reasons must be a list."
-        }), 400
+        return jsonify({"ok": False, "msg": "Reasons must be a list."}), 400
 
     if len(reasons) > 10 or not all(
         isinstance(reason, str) and 0 < len(reason.strip()) <= 100
         for reason in reasons
     ):
-        return jsonify({
-            "ok": False,
-            "msg": "Invalid feedback reasons."
-        }), 400
+        return jsonify({"ok": False, "msg": "Invalid feedback reasons."}), 400
 
     if not isinstance(comment, str):
-        return jsonify({
-            "ok": False,
-            "msg": "Invalid comment."
-        }), 400
+        return jsonify({"ok": False, "msg": "Invalid comment."}), 400
 
     comment = comment.strip()
 
     if len(comment) > 2000:
-        return jsonify({
-            "ok": False,
-            "msg": "Comment is too long."
-        }), 400
-    
+        return jsonify({"ok": False, "msg": "Comment is too long."}), 400
+
     feature = data.get("feature", "chat")
     if feature not in ("chat", "report", "quiz", "plan"):
         return jsonify({"ok": False, "msg": "Invalid feature."}), 400
@@ -3025,8 +3002,11 @@ def submit_answer_feedback():
     context_json = json.dumps(context, ensure_ascii=False)
     if len(context_json) > 20000:
         return jsonify({"ok": False, "msg": "Context too large."}), 400
+
     app_version = str(data.get("app_version") or "unknown").strip()[:20]
-    # --------------------------------------------------------
+
+    # ─── جديد: ربط التقييم بنسخة الـ prompt عبر run_id ───
+    run_id = str(data.get("run_id") or "").strip()[:64] or None
 
     conn = None
 
@@ -3035,11 +3015,27 @@ def submit_answer_feedback():
         conn = get_conn()
         c = conn.cursor()
 
+        prompt_name = None
+        prompt_version = None
+
+        if run_id:
+            c.execute(
+                "SELECT prompt_name, prompt_version FROM prompt_runs "
+                "WHERE run_id=%s AND (user_id=%s OR user_id IS NULL)",
+                (run_id, g.user_id)
+            )
+            found = c.fetchone()
+            if found:
+                prompt_name, prompt_version = found
+            else:
+                run_id = None   # run_id غير صالح أو لمستخدم آخر
+
         c.execute(
             """
             INSERT INTO answer_feedback
-            (user_id, answer_id, rating, reasons, comment, feature, context, app_version)
-            VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s)
+            (user_id, answer_id, rating, reasons, comment, feature, context,
+             app_version, run_id, prompt_name, prompt_version)
+            VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s, %s)
             ON CONFLICT (user_id, answer_id)
             DO NOTHING
             RETURNING id
@@ -3047,7 +3043,8 @@ def submit_answer_feedback():
             (
                 g.user_id, answer_id, rating,
                 json.dumps(reasons, ensure_ascii=False),
-                comment or None, feature, context_json, app_version
+                comment or None, feature, context_json, app_version,
+                run_id, prompt_name, prompt_version
             )
         )
 
@@ -3075,10 +3072,7 @@ def submit_answer_feedback():
         if conn:
             conn.rollback()
 
-        print(
-            "ERROR in submit_answer_feedback:",
-            repr(e)
-        )
+        print("ERROR in submit_answer_feedback:", repr(e))
 
         return jsonify({
             "ok": False,
