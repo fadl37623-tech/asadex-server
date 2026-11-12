@@ -3941,6 +3941,9 @@ def ensure_feedback_feature_columns():
 
 ensure_feedback_feature_columns()
 
+import prompt_engine
+prompt_engine.init(app, get_conn, require_auth, limiter, GEMINI_API_KEY)
+
 if __name__ == "__main__":
 
     port = int(
