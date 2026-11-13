@@ -486,12 +486,21 @@ def normalize_cache_text(text):
 
     return text
 
+def chat_prompt_version(concise):
+    try:
+        import prompt_engine
+        row = prompt_engine.get_active(
+            "chat_concise" if concise else "chat_detailed")
+        return row["version"] if row else 0
+    except Exception:
+        return 0
 
 def make_cache_key(
     question,
     subject="",
     language="",
-    concise=True
+    concise=True,
+    prompt_version=0
 ):
     """
     إنشاء مفتاح ثابت للسؤال.
@@ -503,6 +512,7 @@ def make_cache_key(
     raw = (
         f"{CACHE_VERSION}|"
         f"{CACHE_MODEL}|"
+        f"p{prompt_version}|"
         f"{subject}|"
         f"{language}|"
         f"{concise}|"
@@ -1099,7 +1109,7 @@ def ai_cache_test():
         "question",
         ""
     ).strip()
-    
+
     subject = data.get(
         "subject",
         ""
@@ -1109,6 +1119,8 @@ def ai_cache_test():
         "language",
         "English"
     )
+
+    concise = bool(data.get("concise", True))
 
     if not question:
 
@@ -1121,7 +1133,8 @@ def ai_cache_test():
         question=question,
         subject=subject,
         language=language,
-        concise=True
+        concise=concise,
+        prompt_version=chat_prompt_version(concise)
     )
 
     cached = get_cached_answer(
@@ -1160,6 +1173,7 @@ def ai_cache_test():
         "msg": "No cached answer found."
     })
 
+
 @app.route("/ai/cache-save", methods=["POST"])
 def ai_cache_save():
     auth_error = require_auth()
@@ -1186,9 +1200,8 @@ def ai_cache_save():
             subject=subject,
             language=language,
             concise=concise,
+            prompt_version=chat_prompt_version(concise),
         )
-
-        question_hash = make_question_hash(question)
 
         save_cached_answer(
             cache_key=cache_key,
@@ -1208,7 +1221,7 @@ def ai_cache_save():
         print("CACHE SAVE ERROR:", repr(e))
         return jsonify({
             "ok": False,
-            "error": str(e)
+            "error": "Could not save cache."
         }), 500
 
 def strip_markdown_for_speech(text):
