@@ -19,7 +19,7 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 from google import genai
 from google.genai import types
 
-bp = Blueprint("prompt_engine", name)
+bp = Blueprint("prompt_engine", __name__)
 
 MODEL = "gemini-2.5-flash"
 CACHE_TTL_SECONDS = 30
