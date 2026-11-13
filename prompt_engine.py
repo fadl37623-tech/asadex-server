@@ -19,7 +19,7 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 from google import genai
 from google.genai import types
 
-bp = Blueprint("prompt_engine", __name__)
+bp = Blueprint("prompt_engine", name)
 
 MODEL = "gemini-2.5-flash"
 CACHE_TTL_SECONDS = 30
@@ -430,6 +430,10 @@ def ai_run_stream():
         headers={"X-Run-Id": run_id, "X-Prompt-Version": str(p["version"])},
     )
 
+
+# ============================================================
+# Admin: عرض / إنشاء نسخة / تفعيل / تراجع
+# الحماية: هيدر X-Admin-Key = متغير البيئة ADMIN_KEY
 # ============================================================
 
 def _admin_ok():
@@ -557,6 +561,62 @@ def admin_activate():
         if conn:
             conn.rollback()
         print("ADMIN ACTIVATE ERROR:", repr(e))
+        return _bad("Failed.", 500)
+    finally:
+        if conn:
+            conn.close()
+
+
+# ============================================================
+# Admin: إحصاءات التقييم لكل نسخة prompt (بداية المحلل)
+# يقبل المفتاح في الهيدر X-Admin-Key أو في ?key= (للاختبار من المتصفح)
+# ============================================================
+
+@bp.route("/admin/prompt-stats", methods=["GET"])
+def admin_prompt_stats():
+    expected = os.environ.get("ADMIN_KEY", "")
+    supplied = request.headers.get("X-Admin-Key") or request.args.get("key", "")
+    if not expected or not secrets.compare_digest(
+        supplied.encode("utf-8"), expected.encode("utf-8")
+    ):
+        return _bad("Unauthorized", 403)
+    conn = None
+    try:
+        conn = _deps["get_conn"]()
+        c = conn.cursor()
+        c.execute("""
+            SELECT prompt_name, prompt_version,
+                   COUNT(*),
+                   COUNT(*) FILTER (WHERE rating = 1),
+                   COUNT(*) FILTER (WHERE rating = -1),
+                   AVG(rating)
+            FROM answer_feedback
+            WHERE prompt_name IS NOT NULL
+            GROUP BY prompt_name, prompt_version
+            ORDER BY prompt_name, prompt_version
+        """)
+        feedback = [
+            {"prompt": n, "version": v, "total": t, "positive": p, "negative": ng,
+             "average_rating": round(float(a), 2) if a is not None else 0}
+            for n, v, t, p, ng, a in c.fetchall()
+        ]
+        c.execute("""
+            SELECT prompt_name, prompt_version,
+                   COUNT(*),
+                   COUNT(*) FILTER (WHERE success),
+                   AVG(latency_ms)
+            FROM prompt_runs
+            GROUP BY prompt_name, prompt_version
+            ORDER BY prompt_name, prompt_version
+        """)
+        runs = [
+            {"prompt": n, "version": v, "runs": t, "succeeded": s,
+             "avg_latency_ms": round(float(l), 1) if l is not None else None}
+            for n, v, t, s, l in c.fetchall()
+        ]
+        return jsonify({"ok": True, "feedback": feedback, "runs": runs})
+    except Exception as e:
+        print("PROMPT STATS ERROR:", repr(e))
         return _bad("Failed.", 500)
     finally:
         if conn:
