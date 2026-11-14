@@ -3962,6 +3962,14 @@ ensure_feedback_feature_columns()
 import prompt_engine
 prompt_engine.init(app, get_conn, require_auth, limiter, GEMINI_API_KEY)
 
+def _retired_ai_endpoint():
+    print("LEGACY AI ENDPOINT CALLED:", request.path)
+    return jsonify({"ok": False, "error": "This endpoint was retired."}), 410
+
+
+app.view_functions["ai_generate"] = _retired_ai_endpoint
+app.view_functions["ai_generate_stream"] = _retired_ai_endpoint
+
 if __name__ == "__main__":
 
     port = int(
