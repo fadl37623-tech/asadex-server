@@ -1152,10 +1152,21 @@ def ai_cache_test():
             success=True
         )
 
+        run_id = None
+        try:
+            import prompt_engine
+            run_id = prompt_engine.record_cache_run(
+                g.user_id,
+                "chat_concise" if concise else "chat_detailed"
+            )
+        except Exception as e:
+            print("CACHE RUN LINK ERROR:", repr(e))
+
         return jsonify({
             "ok": True,
             "cache_hit": True,
-            "answer": cached
+            "answer": cached,
+            "run_id": run_id
         })
 
     record_analytics(

@@ -98,9 +98,11 @@ def _create_tables():
                 latency_ms DOUBLE PRECISION,
                 success BOOLEAN NOT NULL DEFAULT TRUE,
                 error_type TEXT,
+                cached BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
             )
         """)
+        c.execute("ALTER TABLE prompt_runs ADD COLUMN IF NOT EXISTS cached BOOLEAN NOT NULL DEFAULT FALSE")
         c.execute("""
             CREATE INDEX IF NOT EXISTS prompt_runs_name_version
             ON prompt_runs(prompt_name, prompt_version)
@@ -248,8 +250,21 @@ def _prepare(data):
     variables = data.get("variables") or {}
     if not isinstance(variables, dict) or len(variables) > 20:
         return None, _bad("Invalid variables.")
+    cfg = active["config"]
+    variants = cfg.get("variants") or {}
+    defaults = cfg.get("variant_defaults") or {}
     system = active["text"]
+
+    # متغيرات "اختيار": العميل يرسل مفتاح الخيار فقط، والنص يأتي من إعداد الـ prompt
+    for key, options in variants.items():
+        chosen = variables.get(key, defaults.get(key))
+        if not isinstance(chosen, str) or chosen not in options:
+            return None, _bad("Invalid option for " + key + ".")
+        system = system.replace("{{" + key + "}}", options[chosen])
+
     for key, value in variables.items():
+        if key in variants:
+            continue
         if not VAR_RE.match(str(key)) or not isinstance(value, (str, int, float)):
             return None, _bad("Invalid variables.")
         value = str(value)
@@ -347,6 +362,37 @@ def _log_run(run_id, user_id, p, latency_ms, success, error_type=None):
             conn.close()
 
 
+def record_cache_run(user_id, prompt_name):
+    """يسجّل إجابة خرجت من الكاش كطلب، ليُربط تقييمها بنسخة الـ prompt.
+    مفتاح الكاش يتضمن نسخة الـ prompt، فنسخة الإجابة = النسخة الفعّالة الآن."""
+    active = get_active(prompt_name)
+    if not active:
+        return None
+    run_id = uuid.uuid4().hex
+    conn = None
+    try:
+        conn = _deps["get_conn"]()
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO prompt_runs
+            (run_id, user_id, prompt_name, prompt_version, latency_ms, success, cached)
+            VALUES (%s, %s, %s, %s, 0, TRUE, TRUE)
+            """,
+            (run_id, user_id, prompt_name, active["version"]),
+        )
+        conn.commit()
+        return run_id
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print("CACHE RUN LOG ERROR:", repr(e))
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
 # ============================================================
 # /ai/run  و  /ai/run-stream
 # ============================================================
@@ -362,6 +408,7 @@ def ai_run():
     p, err = _prepare(request.get_json(silent=True) or {})
     if err:
         return err
+
     run_id = uuid.uuid4().hex
     start = time.perf_counter()
     try:
@@ -435,7 +482,6 @@ def ai_run_stream():
 # Admin: عرض / إنشاء نسخة / تفعيل / تراجع
 # الحماية: هيدر X-Admin-Key = متغير البيئة ADMIN_KEY
 # ============================================================
-
 def _admin_ok():
     expected = os.environ.get("ADMIN_KEY", "")
     supplied = request.headers.get("X-Admin-Key", "")
@@ -453,6 +499,27 @@ def _clean_config(cfg):
         out["thinking_budget"] = tb
     if cfg.get("google_search") is True:
         out["google_search"] = True
+
+    variants = cfg.get("variants")
+    if isinstance(variants, dict) and 0 < len(variants) <= 5:
+        clean = {}
+        for var, options in variants.items():
+            if not VAR_RE.match(str(var)) or not isinstance(options, dict) or not 0 < len(options) <= 6:
+                continue
+            opts = {
+                str(k): v for k, v in options.items()
+                if VAR_RE.match(str(k)) and isinstance(v, str) and 0 < len(v) <= 10000
+            }
+            if opts:
+                clean[var] = opts
+        if clean:
+            out["variants"] = clean
+            defaults = cfg.get("variant_defaults")
+            if isinstance(defaults, dict):
+                out["variant_defaults"] = {
+                    k: v for k, v in defaults.items()
+                    if k in clean and v in clean[k]
+                }
     return out
 
 
@@ -518,7 +585,7 @@ def admin_create():
             VALUES (%s, %s, %s, %s::jsonb, 'draft', %s, %s)
             """,
             (name, version, text, json.dumps(_clean_config(data.get("config"))),
-             "engine" if data.get("source") == "engine" else "manual", notes),
+            "engine" if data.get("source") == "engine" else "manual", notes),
         )
         conn.commit()
         return jsonify({"ok": True, "name": name, "version": version, "status": "draft"})
@@ -580,6 +647,7 @@ def admin_prompt_stats():
         supplied.encode("utf-8"), expected.encode("utf-8")
     ):
         return _bad("Unauthorized", 403)
+
     conn = None
     try:
         conn = _deps["get_conn"]()
@@ -602,17 +670,18 @@ def admin_prompt_stats():
         ]
         c.execute("""
             SELECT prompt_name, prompt_version,
-                   COUNT(*),
-                   COUNT(*) FILTER (WHERE success),
-                   AVG(latency_ms)
+                   COUNT(*) FILTER (WHERE NOT cached),
+                   COUNT(*) FILTER (WHERE success AND NOT cached),
+                   COUNT(*) FILTER (WHERE cached),
+                   AVG(latency_ms) FILTER (WHERE NOT cached)
             FROM prompt_runs
             GROUP BY prompt_name, prompt_version
             ORDER BY prompt_name, prompt_version
         """)
         runs = [
-            {"prompt": n, "version": v, "runs": t, "succeeded": s,
+            {"prompt": n, "version": v, "runs": t, "succeeded": s, "cache_hits": ch,
              "avg_latency_ms": round(float(l), 1) if l is not None else None}
-            for n, v, t, s, l in c.fetchall()
+            for n, v, t, s, ch, l in c.fetchall()
         ]
         return jsonify({"ok": True, "feedback": feedback, "runs": runs})
     except Exception as e:
