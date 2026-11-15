@@ -3963,6 +3963,9 @@ import prompt_engine
 prompt_engine.init(app, get_conn, require_auth, limiter, GEMINI_API_KEY)
 import analyzer
 analyzer.init(app, get_conn, prompt_engine.run_internal)
+import evaluator
+evaluator.init(app, get_conn, prompt_engine.run_internal,
+               prompt_engine.run_version, prompt_engine.get_active)
 
 def _retired_ai_endpoint():
     print("LEGACY AI ENDPOINT CALLED:", request.path)
