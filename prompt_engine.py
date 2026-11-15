@@ -103,6 +103,7 @@ def _create_tables():
             )
         """)
         c.execute("ALTER TABLE prompt_runs ADD COLUMN IF NOT EXISTS cached BOOLEAN NOT NULL DEFAULT FALSE")
+        c.execute("ALTER TABLE prompt_runs ADD COLUMN IF NOT EXISTS error_detail TEXT")
         c.execute("""
             CREATE INDEX IF NOT EXISTS prompt_runs_name_version
             ON prompt_runs(prompt_name, prompt_version)
@@ -243,10 +244,10 @@ def _prepare(data):
     name = data.get("prompt")
     if not isinstance(name, str) or not NAME_RE.match(name):
         return None, _bad("Invalid prompt name.")
-
     active = get_active(name)
     if not active:
         return None, _bad("Unknown prompt.", 404)
+
     variables = data.get("variables") or {}
     if not isinstance(variables, dict) or len(variables) > 20:
         return None, _bad("Invalid variables.")
@@ -339,7 +340,7 @@ def _grounding_sources(response):
     return sources
 
 
-def _log_run(run_id, user_id, p, latency_ms, success, error_type=None):
+def _log_run(run_id, user_id, p, latency_ms, success, error_type=None, error_detail=None):
     conn = None
     try:
         conn = _deps["get_conn"]()
@@ -347,10 +348,11 @@ def _log_run(run_id, user_id, p, latency_ms, success, error_type=None):
         c.execute(
             """
             INSERT INTO prompt_runs
-            (run_id, user_id, prompt_name, prompt_version, latency_ms, success, error_type)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (run_id, user_id, prompt_name, prompt_version, latency_ms, success, error_type, error_detail)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (run_id, user_id, p["name"], p["version"], latency_ms, success, error_type),
+            (run_id, user_id, p["name"], p["version"], latency_ms, success, error_type,
+             (error_detail or None) and str(error_detail)[:300]),
         )
         conn.commit()
     except Exception as e:
@@ -360,6 +362,33 @@ def _log_run(run_id, user_id, p, latency_ms, success, error_type=None):
     finally:
         if conn:
             conn.close()
+
+
+def run_internal(prompt_name, user_input):
+    """يشغّل prompt من داخل السيرفر. يرجع (النص, نسخة الـ prompt, run_id)."""
+    active = get_active(prompt_name)
+    if not active:
+        raise RuntimeError("Unknown prompt: " + prompt_name)
+    p = {
+        "name": prompt_name,
+        "version": active["version"],
+        "system": active["text"],
+        "contents": user_input,
+        "cfg": active["config"],
+    }
+    run_id = uuid.uuid4().hex
+    start = time.perf_counter()
+    try:
+        response = _generate(p)
+        text = response.text
+        if not text:
+            raise RuntimeError("empty answer")
+        _log_run(run_id, None, p, round((time.perf_counter() - start) * 1000, 2), True)
+        return text, active["version"], run_id
+    except Exception as e:
+        _log_run(run_id, None, p, round((time.perf_counter() - start) * 1000, 2),
+                 False, type(e).__name__, str(e))
+        raise
 
 
 def record_cache_run(user_id, prompt_name):
@@ -433,7 +462,7 @@ def ai_run():
     except Exception as e:
         ms = round((time.perf_counter() - start) * 1000, 2)
         print("AI RUN ERROR:", repr(e))
-        _log_run(run_id, g.user_id, p, ms, False, type(e).__name__)
+        _log_run(run_id, g.user_id, p, ms, False, type(e).__name__, str(e))
         return jsonify({"ok": False, "error": "Something went wrong.", "run_id": run_id}), 500
 
 
@@ -451,7 +480,6 @@ def ai_run_stream():
 
     run_id = uuid.uuid4().hex
     user_id = g.user_id
-
     def generate():
         start = time.perf_counter()
         try:
@@ -468,7 +496,7 @@ def ai_run_stream():
         except Exception as e:
             print("AI RUN STREAM ERROR:", repr(e))
             _log_run(run_id, user_id, p, round((time.perf_counter() - start) * 1000, 2),
-                     False, type(e).__name__)
+                     False, type(e).__name__, str(e))
             yield "\n" + STREAM_ERROR_MARK
 
     return Response(
@@ -482,6 +510,7 @@ def ai_run_stream():
 # Admin: عرض / إنشاء نسخة / تفعيل / تراجع
 # الحماية: هيدر X-Admin-Key = متغير البيئة ADMIN_KEY
 # ============================================================
+
 def _admin_ok():
     expected = os.environ.get("ADMIN_KEY", "")
     supplied = request.headers.get("X-Admin-Key", "")
@@ -557,8 +586,6 @@ def admin_list():
     finally:
         if conn:
             conn.close()
-
-
 @bp.route("/admin/prompts", methods=["POST"])
 def admin_create():
     """ينشئ نسخة جديدة كمسودة (draft) ولا يفعّلها."""
@@ -585,7 +612,7 @@ def admin_create():
             VALUES (%s, %s, %s, %s::jsonb, 'draft', %s, %s)
             """,
             (name, version, text, json.dumps(_clean_config(data.get("config"))),
-            "engine" if data.get("source") == "engine" else "manual", notes),
+             "engine" if data.get("source") == "engine" else "manual", notes),
         )
         conn.commit()
         return jsonify({"ok": True, "name": name, "version": version, "status": "draft"})

@@ -439,7 +439,7 @@ QUALITY RULES:
 """
 
 SOURCE_SYSTEM = """You are the scientific research source finder for the
-Asadex educational application.
+SciGo educational application.
 
 The student's message gives a TOPIC, important scientific concepts,
 related scientific concepts and technical keywords.
@@ -506,6 +506,32 @@ the search results are genuinely relevant to the topic.
 Use the searched sources in your answer.
 """
 
+ANALYZER_SYSTEM = """You analyze NEGATIVE user feedback for Asadex, an educational app for Mathematics, Physics and Chemistry.
+
+Input is JSON: {"items": [{"id": int, "feature": "chat"|"plan"|"quiz"|"report", "reasons": [str], "comment": str, "context": str}]}
+"context" is truncated JSON describing what the user saw (question/answer, plan request/topics/tasks, quiz questions, report title/sections).
+
+For EACH item return:
+- "category": exactly one of:
+  scientific_error, unclear_explanation, wrong_topic, too_simple, too_hard, too_crowded, bad_images, bad_sources, ui_problem, wrong_language, format_problem, other
+- "cause": where the fix lies, exactly one of:
+  "prompt" (the AI instructions can fix it),
+  "code" (app logic, validation or search bug),
+  "ui" (interface or design),
+  "data" (sources or images retrieval),
+  "unclear" (not enough information)
+- "summary": ONE short sentence in Arabic describing the concrete problem.
+
+Rules:
+- The reasons the user selected are the primary signal; use the comment and context to refine.
+- Never invent details that are not in the input. If the information is insufficient, use category "other" and cause "unclear".
+- "Images not suitable" and "Sources not useful" are usually cause "data" or "code", not "prompt".
+- If the comment is about the interface or design, use "ui_problem" and cause "ui".
+- If the context shows that an answer or a quiz answer is factually wrong, use "scientific_error" and cause "prompt".
+- Return JSON only, with no markdown: {"items":[{"id":1,"category":"...","cause":"...","summary":"..."}]}
+- Return exactly one result per input item, using the same ids.
+"""
+
 SEEDS = {
     "chat_concise": {"text": _chat(CONCISE), "config": {"thinking_budget": 1024}},
     "chat_detailed": {"text": _chat(DETAILED), "config": {"thinking_budget": 1024}},
@@ -552,4 +578,5 @@ SEEDS = {
         },
     },
     "source_search": {"text": SOURCE_SYSTEM, "config": {"google_search": True}},
+    "analyzer_classify": {"text": ANALYZER_SYSTEM, "config": {"thinking_budget": 1024}},
 }
