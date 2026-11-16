@@ -391,6 +391,48 @@ def run_internal(prompt_name, user_input):
         raise
 
 
+def get_version_row(prompt_name, version):
+    conn = None
+    try:
+        conn = _deps["get_conn"]()
+        c = conn.cursor()
+        c.execute(
+            "SELECT text, config, status FROM prompts WHERE name=%s AND version=%s",
+            (prompt_name, version),
+        )
+        row = c.fetchone()
+    finally:
+        if conn:
+            conn.close()
+    if not row:
+        return None
+    cfg = row[1] if isinstance(row[1], dict) else json.loads(row[1] or "{}")
+    return {"text": row[0], "config": cfg, "status": row[2]}
+
+
+def run_version(prompt_name, version, user_input, variables=None):
+    """يشغّل نسخة محددة من prompt (حتى لو لم تكن فعّالة) ويرجع النص.
+    للتقييم فقط: لا يُسجَّل في prompt_runs حتى لا يلوّث الإحصاءات."""
+    row = get_version_row(prompt_name, version)
+    if not row:
+        raise RuntimeError("Unknown prompt version")
+    cfg = row["config"]
+    variables = variables or {}
+    system = row["text"]
+    for key, options in (cfg.get("variants") or {}).items():
+        chosen = variables.get(key, (cfg.get("variant_defaults") or {}).get(key))
+        if not isinstance(chosen, str) or chosen not in options:
+            raise RuntimeError("Invalid option for " + key)
+        system = system.replace("{{" + key + "}}", options[chosen])
+    p = {"name": prompt_name, "version": version, "system": system,
+         "contents": user_input, "cfg": cfg}
+    response = _generate(p)
+    text = response.text
+    if not text:
+        raise RuntimeError("empty answer")
+    return text
+
+
 def record_cache_run(user_id, prompt_name):
     """يسجّل إجابة خرجت من الكاش كطلب، ليُربط تقييمها بنسخة الـ prompt.
     مفتاح الكاش يتضمن نسخة الـ prompt، فنسخة الإجابة = النسخة الفعّالة الآن."""
@@ -425,7 +467,6 @@ def record_cache_run(user_id, prompt_name):
 # ============================================================
 # /ai/run  و  /ai/run-stream
 # ============================================================
-
 @bp.route("/ai/run", methods=["POST"])
 def ai_run():
     from flask import g
@@ -480,6 +521,7 @@ def ai_run_stream():
 
     run_id = uuid.uuid4().hex
     user_id = g.user_id
+
     def generate():
         start = time.perf_counter()
         try:
@@ -586,6 +628,8 @@ def admin_list():
     finally:
         if conn:
             conn.close()
+
+
 @bp.route("/admin/prompts", methods=["POST"])
 def admin_create():
     """ينشئ نسخة جديدة كمسودة (draft) ولا يفعّلها."""

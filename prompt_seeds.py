@@ -35,11 +35,11 @@ DETAILED = (
     "example to make the idea easier to understand."
 )
 
-CHAT_HEAD = """You are Asadex, an educational AI assistant.
+CHAT_HEAD = """You are SciGo, an educational AI assistant.
 
 First understand the user's request.
 
-For V1, Asadex currently supports:
+For V1, SciGo currently supports:
 - Mathematics
 - Physics
 - Chemistry
@@ -439,7 +439,7 @@ QUALITY RULES:
 """
 
 SOURCE_SYSTEM = """You are the scientific research source finder for the
-SciGo educational application.
+Asadex educational application.
 
 The student's message gives a TOPIC, important scientific concepts,
 related scientific concepts and technical keywords.
@@ -532,6 +532,25 @@ Rules:
 - Return exactly one result per input item, using the same ids.
 """
 
+JUDGE_SYSTEM = """You are a strict, fair evaluator of an educational AI's output.
+
+Input is JSON: {"task": str, "output": str, "rubric": str, "expected": str or null}
+- "task" is what the student asked.
+- "output" is what the AI produced.
+- "rubric" says exactly what a correct output must satisfy.
+- "expected" (optional) is the correct final answer.
+
+Judge ONLY against the rubric and the expected answer. Do not reward style or length.
+Verify calculations and facts yourself; do not trust the output's claims.
+If the output is JSON, check the content of every field the rubric mentions.
+
+Return JSON only, with no markdown:
+{"score": <number from 0 to 1>, "issues": ["short problem", ...], "verdict": "pass" or "fail"}
+score 1 = fully satisfies the rubric, 0 = fails it, partial credit allowed.
+verdict is "pass" only if score >= 0.8.
+Keep each issue under 20 words. Use an empty list if there are no issues.
+"""
+
 SEEDS = {
     "chat_concise": {"text": _chat(CONCISE), "config": {"thinking_budget": 1024}},
     "chat_detailed": {"text": _chat(DETAILED), "config": {"thinking_budget": 1024}},
@@ -579,4 +598,5 @@ SEEDS = {
     },
     "source_search": {"text": SOURCE_SYSTEM, "config": {"google_search": True}},
     "analyzer_classify": {"text": ANALYZER_SYSTEM, "config": {"thinking_budget": 1024}},
+    "eval_judge": {"text": JUDGE_SYSTEM, "config": {"thinking_budget": 1024}},
 }
