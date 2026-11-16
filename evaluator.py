@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import threading
+import time
 import uuid
 from urllib.parse import quote
 
@@ -25,9 +26,14 @@ from eval_cases import CASES
 bp = Blueprint("evaluator", __name__)
 _deps = {}
 
-WORKERS = 3
+# حدود Gemini المجانية قليلة (طلبات في الدقيقة). لذلك يعمل المختبر بتباطؤ.
+# على حساب مدفوع اضبط في Render:  EVAL_MIN_INTERVAL=0  و  EVAL_WORKERS=3
+WORKERS = int(os.environ.get("EVAL_WORKERS", "1"))
+MIN_INTERVAL = float(os.environ.get("EVAL_MIN_INTERVAL", "6.5"))   # ثوانٍ بين أي طلبين
+BACKOFF_SECONDS = (20, 40, 70)                                     # انتظار عند 429
 JUDGE_WEIGHT = 2          # وزن الحَكَم مقابل كل فحص آلي
 PASS_SCORE = 0.8
+UNRELIABLE_ERROR_SHARE = 0.3
 
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
 _LATIN = re.compile(r"[A-Za-z]")
@@ -345,15 +351,56 @@ def score_case(check_results, judge):
     if judge is not None:
         return (passed + JUDGE_WEIGHT * judge["score"]) / (n + JUDGE_WEIGHT)
     return passed / n if n else 0.0
-def run_case(prompt_name, version, case):
-    """case: dict فيه case_key, user_input, variables, checks."""
+
+
+_pace_lock = threading.Lock()
+_last_call = [0.0]
+
+
+def _pace():
+    """يفصل بين طلبات المختبر زمنياً حتى لا نتجاوز حدّ الطلبات في الدقيقة."""
+    if MIN_INTERVAL <= 0:
+        return
+    with _pace_lock:
+        wait = _last_call[0] + MIN_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_call[0] = time.monotonic()
+
+
+def _is_quota_error(e):
+    s = str(e)
+    return "429" in s or "RESOURCE_EXHAUSTED" in s
+
+
+def _call_with_backoff(fn):
+    """ينفّذ طلباً مع تباطؤ، ويعيد المحاولة بعد انتظار أطول عند خطأ الحصة 429."""
+    for attempt in range(len(BACKOFF_SECONDS) + 1):
+        _pace()
+        try:
+            return fn()
+        except Exception as e:
+            if not _is_quota_error(e) or attempt >= len(BACKOFF_SECONDS):
+                raise
+            time.sleep(BACKOFF_SECONDS[attempt])
+
+
+def run_case(prompt_name, version, case, state=None):
+    """case: dict فيه case_key, user_input, variables, checks.
+    state: قاموس مشترك؛ إذا استُنفدت الحصة نوقف باقي الحالات فوراً."""
+    state = state if state is not None else {}
     base = {"case_key": case["case_key"], "errored": False, "score": None,
             "passed": None, "checks": [], "judge": None, "output": ""}
+    if state.get("quota_dead"):
+        base.update(errored=True, output="ERROR: stopped (Gemini quota exhausted)")
+        return base
     try:
-        output = _deps["run_version"](
+        output = _call_with_backoff(lambda: _deps["run_version"](
             prompt_name, version, case["user_input"], case.get("variables") or {}
-        )
+        ))
     except Exception as e:
+        if _is_quota_error(e):
+            state["quota_dead"] = True
         base.update(errored=True, output="ERROR: " + str(e)[:300])
         return base
 
@@ -365,8 +412,11 @@ def run_case(prompt_name, version, case):
     judge = None
     if judge_spec:
         try:
-            judge = run_judge(case["user_input"], output, judge_spec)
+            judge = _call_with_backoff(
+                lambda: run_judge(case["user_input"], output, judge_spec))
         except Exception as e:
+            if _is_quota_error(e):
+                state["quota_dead"] = True
             base.update(errored=True, checks=results,
                         judge={"error": str(e)[:200]})
             return base
@@ -434,9 +484,13 @@ def _worker(run_id, prompt_name, version):
         if not cases:
             _finish_run(run_id, "error", [], "no cases for this prompt")
             return
-        with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
-            results = list(pool.map(lambda cs: run_case(prompt_name, version, cs), cases))
-        _finish_run(run_id, "done", results)
+        state = {"quota_dead": False}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, WORKERS)) as pool:
+            results = list(pool.map(lambda cs: run_case(prompt_name, version, cs, state), cases))
+        note = None
+        if state["quota_dead"]:
+            note = "توقف الاختبار لأن حصة Gemini استُنفدت (429). أعد التشغيل لاحقاً أو فعّل الفوترة."
+        _finish_run(run_id, "done", results, note)
     except Exception as e:
         print("EVAL WORKER ERROR:", repr(e))
         try:
@@ -460,6 +514,50 @@ def start_run(prompt_name, version):
         conn.close()
     threading.Thread(target=_worker, args=(run_id, prompt_name, version), daemon=True).start()
     return run_id
+
+
+def run_sync(prompt_name, version):
+    """يشغّل تقييماً كاملاً ويعود بعد اكتماله (للاستعمال داخل خيط خلفي). يرجع run_id."""
+    if not _load_cases(prompt_name):
+        raise ValueError("No evaluation cases for this prompt.")
+    run_id = uuid.uuid4().hex[:12]
+    conn = _deps["get_conn"]()
+    try:
+        c = conn.cursor()
+        c.execute("INSERT INTO eval_runs (run_id, prompt_name, version) VALUES (%s, %s, %s)",
+                  (run_id, prompt_name, version))
+        conn.commit()
+    finally:
+        conn.close()
+    _worker(run_id, prompt_name, version)
+    return run_id
+
+
+def latest_done_run(prompt_name, version, max_age_hours=24):
+    """آخر تقييم مكتمل وموثوق لنسخة (أخطاء التوليد قليلة)، أو None."""
+    conn = _deps["get_conn"]()
+    try:
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT run_id FROM eval_runs
+            WHERE prompt_name=%s AND version=%s AND status='done'
+              AND n_cases > 0 AND n_errors <= n_cases * 0.3
+              AND started_at > NOW() - (%s || ' hours')::interval
+            ORDER BY started_at DESC LIMIT 1
+            """,
+            (prompt_name, version, str(max_age_hours)),
+        )
+        row = c.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def get_run_results(run_id):
+    return _run_details(run_id)
+def load_case_inputs(prompt_name):
+    return {c["case_key"]: c["user_input"] for c in _load_cases(prompt_name)}
 
 
 # ============================================================
@@ -524,6 +622,8 @@ def render_list(prompts, runs, message, key):
         out.append("<div class='card muted'>لم يُشغَّل أي اختبار بعد.</div>")
     out.append("</body></html>")
     return "".join(out)
+
+
 def render_run(run, results, key):
     k = quote(key)
     out = [f"<!doctype html><html lang='ar' dir='rtl'><head><meta charset='utf-8'>"
@@ -535,6 +635,10 @@ def render_run(run, results, key):
            f"<p><a href='?key={k}'>← رجوع</a></p>"]
     if run.get("note"):
         out.append(f"<div class='card warn'>{_e(run['note'])}</div>")
+    if run["n_cases"] and run["n_errors"] >= run["n_cases"] * UNRELIABLE_ERROR_SHARE:
+        out.append(f"<div class='card warn'>⚠️ الدرجة غير موثوقة: {run['n_errors']} من {run['n_cases']} "
+                   "حالات فشل توليدها (غالباً حد حصة Gemini 429)، وهي لا تدخل في الدرجة. "
+                   "لا تعتمد على هذا الرقم، وأعد التشغيل لاحقاً.</div>")
     if run["status"] == "running":
         out.append("<div class='card'>الاختبار ما زال يعمل، حدّث الصفحة بعد دقيقة.</div>")
     for r in results:
@@ -605,7 +709,7 @@ def _run_details(run_id):
     try:
         c = conn.cursor()
         c.execute("""SELECT run_id, prompt_name, version, status, n_cases, n_errors, score, pass_rate, note
-                    FROM eval_runs WHERE run_id=%s""", (run_id,))
+                     FROM eval_runs WHERE run_id=%s""", (run_id,))
         r = c.fetchone()
         if not r:
             return None, []

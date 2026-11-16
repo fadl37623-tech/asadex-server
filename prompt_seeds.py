@@ -35,11 +35,11 @@ DETAILED = (
     "example to make the idea easier to understand."
 )
 
-CHAT_HEAD = """You are SciGo, an educational AI assistant.
+CHAT_HEAD = """You are Asadex, an educational AI assistant.
 
 First understand the user's request.
 
-For V1, SciGo currently supports:
+For V1, Asadex currently supports:
 - Mathematics
 - Physics
 - Chemistry
@@ -551,6 +551,32 @@ verdict is "pass" only if score >= 0.8.
 Keep each issue under 20 words. Use an empty list if there are no issues.
 """
 
+IMPROVER_SYSTEM = """You improve a SYSTEM PROMPT for Asadex, an educational AI app (Mathematics, Physics, Chemistry).
+
+You receive JSON:
+{"prompt_name": str, "current_prompt": str, "failing_cases": [...], "user_issues": [...], "user_comments": [...]}
+- failing_cases: automated test cases the current prompt FAILED, with the failed checks and the judge's issues.
+- user_issues: problems real users reported, classified, with counts.
+- user_comments: raw user comments.
+
+Your job: rewrite current_prompt so these problems are fixed, with the SMALLEST set of targeted edits.
+
+Hard rules:
+1. Keep everything that works. Do not rewrite from scratch. Do not reorder unrelated sections.
+2. Preserve EXACTLY: the output format and JSON schema with its field names, card markers (:::name), placeholder tokens like {{name}}, the supported-subjects scope rule, and the language rules.
+3. Fix the ROOT CAUSE with a general rule. Never copy a failing test's question or answer into the prompt, and never add examples containing test answers. The new prompt will be tested on hidden cases.
+[11/16/2026 3:25 PM] عباس فاضل: 4. Every edit must be justified by evidence in the input. If the evidence is weak or contradictory (for example some users want shorter and others longer), do not guess: make no edit for it.
+5. The new prompt must not be more than 25 percent longer than the current one.
+6. Write the prompt in English, like the current prompt.
+
+Output format, exactly, with no code fences:
+===CHANGES_JSON===
+[{"what": "short description of one edit", "why": "the evidence it addresses"}]
+===NEW_PROMPT===
+<the complete new prompt text>
+===END===
+"""
+
 SEEDS = {
     "chat_concise": {"text": _chat(CONCISE), "config": {"thinking_budget": 1024}},
     "chat_detailed": {"text": _chat(DETAILED), "config": {"thinking_budget": 1024}},
@@ -599,4 +625,5 @@ SEEDS = {
     "source_search": {"text": SOURCE_SYSTEM, "config": {"google_search": True}},
     "analyzer_classify": {"text": ANALYZER_SYSTEM, "config": {"thinking_budget": 1024}},
     "eval_judge": {"text": JUDGE_SYSTEM, "config": {"thinking_budget": 1024}},
+    "improver_rewrite": {"text": IMPROVER_SYSTEM, "config": {"thinking_budget": 2048}},
 }

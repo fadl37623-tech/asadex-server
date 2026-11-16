@@ -433,6 +433,77 @@ def run_version(prompt_name, version, user_input, variables=None):
     return text
 
 
+def clear_cache():
+    _clear_cache()
+
+
+def create_draft(name, text, config, notes="", source="engine"):
+    """ينشئ نسخة جديدة كمسودة (لا تُفعَّل). يرجع رقم النسخة."""
+    conn = None
+    try:
+        conn = _deps["get_conn"]()
+        c = conn.cursor()
+        c.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM prompts WHERE name=%s", (name,))
+        version = c.fetchone()[0]
+        c.execute(
+            """
+            INSERT INTO prompts (name, version, text, config, status, source, notes)
+            VALUES (%s, %s, %s, %s::jsonb, 'draft', %s, %s)
+            """,
+            (name, version, text, json.dumps(config or {}), source, (notes or "")[:500]),
+        )
+        conn.commit()
+        return version
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+def activate_version(name, version):
+    """يفعّل نسخة (والتراجع = تفعيل نسخة أقدم). يرجع True عند النجاح."""
+    conn = None
+    try:
+        conn = _deps["get_conn"]()
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM prompts WHERE name=%s AND version=%s", (name, version))
+        if not c.fetchone():
+            return False
+        c.execute("UPDATE prompts SET status='archived' WHERE name=%s AND status='active'", (name,))
+        c.execute(
+            "UPDATE prompts SET status='active', activated_at=NOW() WHERE name=%s AND version=%s",
+            (name, version),
+        )
+        conn.commit()
+        _clear_cache()
+        return True
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def archive_draft(name, version):
+    conn = None
+    try:
+        conn = _deps["get_conn"]()
+        c = conn.cursor()
+        c.execute("UPDATE prompts SET status='archived' WHERE name=%s AND version=%s AND status='draft'",
+                  (name, version))
+        conn.commit()
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
 def record_cache_run(user_id, prompt_name):
     """يسجّل إجابة خرجت من الكاش كطلب، ليُربط تقييمها بنسخة الـ prompt.
     مفتاح الكاش يتضمن نسخة الـ prompt، فنسخة الإجابة = النسخة الفعّالة الآن."""
@@ -467,6 +538,7 @@ def record_cache_run(user_id, prompt_name):
 # ============================================================
 # /ai/run  و  /ai/run-stream
 # ============================================================
+
 @bp.route("/ai/run", methods=["POST"])
 def ai_run():
     from flask import g
@@ -521,7 +593,6 @@ def ai_run_stream():
 
     run_id = uuid.uuid4().hex
     user_id = g.user_id
-
     def generate():
         start = time.perf_counter()
         try:
@@ -628,8 +699,6 @@ def admin_list():
     finally:
         if conn:
             conn.close()
-
-
 @bp.route("/admin/prompts", methods=["POST"])
 def admin_create():
     """ينشئ نسخة جديدة كمسودة (draft) ولا يفعّلها."""

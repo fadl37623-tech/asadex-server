@@ -9,6 +9,9 @@
   prompt  : اسم الـ prompt الذي تختبره
   input   : ما يُرسل للنموذج
   checks  : فحوص آلية دقيقة + judge (حَكَم ذكاء اصطناعي بمعيار وإجابة متوقعة)
+  holdout : True = حالة مخفية عن المحسّن (لا يراها ولا يرى مخرجاتها). تُستخدم فقط
+            في المقارنة النهائية لكشف "التدريب على الاختبار". احرص أن يكون لكل prompt
+            حالتان مخفيتان على الأقل ونحو نصف حالاته.
 
 أضف حالات جديدة باستمرار (الهدف 30-50). لا تحذف حالة قديمة.
 """
@@ -40,7 +43,7 @@ CASES = [
         },
     },
     {
-        "key": "chat_quadratic", "prompt": "chat_concise",
+        "key": "chat_quadratic", "holdout": True, "prompt": "chat_concise",
         "input": "Solve x² - 5x + 6 = 0",
         "checks": {
             "language": "en", "forbidden": NO_FORMAT_LEAKS,
@@ -60,7 +63,7 @@ CASES = [
         },
     },
     {
-        "key": "chat_ph", "prompt": "chat_concise",
+        "key": "chat_ph", "holdout": True, "prompt": "chat_concise",
         "input": "Calculate the pH of a 0.01 M HCl solution.",
         "checks": {
             "language": "en", "forbidden": NO_FORMAT_LEAKS,
@@ -70,7 +73,7 @@ CASES = [
         },
     },
     {
-        "key": "chat_force_ar", "prompt": "chat_concise",
+        "key": "chat_force_ar", "holdout": True, "prompt": "chat_concise",
         "input": "احسب القوة اللازمة لتسريع جسم كتلته 5 كغ بتسارع 3 م/ث².",
         "checks": {
             "language": "ar", "forbidden": NO_FORMAT_LEAKS,
@@ -90,7 +93,7 @@ CASES = [
         },
     },
     {
-        "key": "chat_offtopic", "prompt": "chat_concise",
+        "key": "chat_offtopic", "holdout": True, "prompt": "chat_concise",
         "input": "Who won the 2018 football World Cup?",
         "checks": {
             "language": "en", "no_final_answer": True,
@@ -108,7 +111,7 @@ CASES = [
         },
     },
     {
-        "key": "chat_concept_ar", "prompt": "chat_concise",
+        "key": "chat_concept_ar", "holdout": True, "prompt": "chat_concise",
         "input": "ما الفرق بين الكتلة والوزن؟",
         "checks": {
             "language": "ar", "forbidden": NO_FORMAT_LEAKS,
@@ -130,7 +133,7 @@ CASES = [
         },
     },
     {
-        "key": "plan_quadratic_ar_7days", "prompt": "plan_create",
+        "key": "plan_quadratic_ar_7days", "holdout": True, "prompt": "plan_create",
         "input": "Student request: خطة لمدة 7 أيام لتعلم المعادلات التربيعية",
         "checks": {
             "plan": {"days": [7, 7], "min_tasks": 2, "practice_each_day": True, "language": "ar"},
@@ -146,7 +149,7 @@ CASES = [
         },
     },
     {
-        "key": "plan_newton_3days", "prompt": "plan_create",
+        "key": "plan_newton_3days", "holdout": True, "prompt": "plan_create",
         "input": "Student request: 3 day plan for Newton's laws of motion",
         "checks": {
             "plan": {"days": [3, 3], "min_tasks": 2, "practice_each_day": True, "language": "en"},
@@ -157,6 +160,14 @@ CASES = [
         "key": "plan_quiz_intent", "prompt": "plan_create",
         "input": "Student request: test me on Ohm's law",
         "checks": {"json_intent": "quiz"},
+    },
+    {
+        "key": "plan_offtopic_history", "holdout": True, "prompt": "plan_create",
+        "input": "Student request: study plan for World War 2 history in 5 days",
+        "checks": {
+            "unsupported_key": True,
+            "judge": {"rubric": "The AI must NOT build a history study plan. It must reject the request because it is outside Mathematics, Physics and Chemistry."},
+        },
     },
     {
         "key": "plan_offtopic_cooking", "prompt": "plan_create",
@@ -179,7 +190,7 @@ CASES = [
         },
     },
     {
-        "key": "quiz_newton_ar", "prompt": "quiz_make",
+        "key": "quiz_newton_ar", "holdout": True, "prompt": "quiz_make",
         "input": "Student message: اختبرني في قانون نيوتن الثاني\nNumber of questions: 4",
         "checks": {
             "quiz": {"count": 4, "language": "ar"},
@@ -195,7 +206,7 @@ CASES = [
         },
     },
     {
-        "key": "quiz_vague", "prompt": "quiz_make",
+        "key": "quiz_vague", "holdout": True, "prompt": "quiz_make",
         "input": "Student message: quiz me\nNumber of questions: 4",
         "checks": {
             "quiz": {"count": 4},
