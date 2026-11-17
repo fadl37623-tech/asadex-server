@@ -561,6 +561,12 @@ def ai_run():
         ms = round((time.perf_counter() - start) * 1000, 2)
         _log_run(run_id, g.user_id, p, ms, True)
 
+        try:
+            import feature_requests
+            feature_requests.capture(g.user_id, p["name"], p["contents"], answer)
+        except Exception:
+            pass
+
         out = {
             "ok": True,
             "answer": answer,

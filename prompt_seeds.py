@@ -627,3 +627,7 @@ SEEDS = {
     "eval_judge": {"text": JUDGE_SYSTEM, "config": {"thinking_budget": 1024}},
     "improver_rewrite": {"text": IMPROVER_SYSTEM, "config": {"thinking_budget": 2048}},
 }
+
+import feature_requests as _fr
+SEEDS["request_classify"] = {"text": _fr.CLASSIFY_SYSTEM, "config": {"thinking_budget": 512}}
+SEEDS["feature_proposal_write"] = {"text": _fr.PROPOSAL_SYSTEM, "config": {"thinking_budget": 1024}}
