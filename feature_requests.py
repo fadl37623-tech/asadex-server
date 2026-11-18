@@ -216,7 +216,7 @@ def sync_ratings():
             INSERT INTO feature_signals
                 (source, ref_id, user_id, prompt_name, raw_text, topic_key, title, is_request, classified)
             SELECT 'rating', a.feedback_id, f.user_id, f.prompt_name, a.summary,
-                   f.feature  '_'  a.category, a.summary, TRUE, TRUE
+                   CONCAT(f.feature, '_', a.category), a.summary, TRUE, TRUE
             FROM feedback_analysis a
             JOIN answer_feedback f ON f.id = a.feedback_id
             WHERE a.cause IN ('code', 'ui', 'data')
