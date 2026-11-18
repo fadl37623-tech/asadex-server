@@ -72,6 +72,33 @@ Return JSON only, no markdown:
 """
 
 
+PLAN_SYSTEM = """You are a senior backend engineer planning ONE approved feature for Asadex, an educational app (Flask + PostgreSQL on Render, Gemini via prompts stored in the database, a mobile app client).
+
+Input JSON: {"proposal": {...approved feature spec...}, "code_index": {"file.py": {"routes": [...], "functions": [...]}}}
+code_index lists the REAL server files, their routes and top-level functions. The mobile app source is NOT visible to you.
+Write an implementation plan. Rules:
+- Only reference server files that exist in code_index for edits. New files go under action "create".
+- Prefer the smallest change: reuse existing prompts, tables and helpers. Prefer a new prompt version over new code when the feature is a behavior change.
+- Anything that needs mobile app changes must be listed separately in "app_changes", never hidden in server steps.
+- Never invent functions or files. If unsure, say so in risks.
+- Write the plan in Arabic, except "implementation_brief" which is English and self-contained so a coding assistant can implement it without other context.
+
+Return JSON only, no markdown:
+{"summary": str,
+ "files": [{"path": str, "action": "edit"|"create", "changes": str}],
+ "steps": [str],
+ "new_tables": [str],
+ "new_endpoints": [str],
+ "app_changes": [str],
+ "tests": [str],
+ "rollout": str,
+ "rollback": str,
+ "estimate": str,
+ "risks": [str],
+ "implementation_brief": str}
+"""
+
+
 # ============================================================
 # Setup
 # ============================================================
@@ -82,6 +109,8 @@ def init(app, get_conn, run_internal):
     app.register_blueprint(bp)
     if os.environ.get("FEATURE_AUTO") == "1":
         threading.Thread(target=_auto_loop, daemon=True).start()
+
+
 def _create_tables():
     conn = None
     try:
@@ -118,6 +147,17 @@ def _create_tables():
                 decided_at TIMESTAMP
             )
         """)
+        c.execute("ALTER TABLE feature_proposals ADD COLUMN IF NOT EXISTS plan JSONB")
+        c.execute("ALTER TABLE feature_proposals ADD COLUMN IF NOT EXISTS plan_status TEXT")
+        c.execute("ALTER TABLE feature_proposals ADD COLUMN IF NOT EXISTS plan_note TEXT")
+        # يزرع prompt كتابة الخطة تلقائياً (لا حاجة لتعديل prompt_seeds.py)
+        c.execute("SELECT 1 FROM prompts WHERE name='feature_plan_write' LIMIT 1")
+        if not c.fetchone():
+            c.execute(
+                "INSERT INTO prompts (name, version, text, config, status, source, notes, activated_at) "
+                "VALUES ('feature_plan_write', 1, %s, %s::jsonb, 'active', 'seed', 'initial version', NOW())",
+                (PLAN_SYSTEM, json.dumps({"thinking_budget": 2048})),
+            )
         conn.commit()
     except Exception as e:
         if conn:
@@ -134,8 +174,6 @@ def _admin_ok():
     return bool(expected) and secrets.compare_digest(
         supplied.encode("utf-8"), expected.encode("utf-8")
     )
-
-
 # ============================================================
 # الالتقاط (يُستدعى من prompt_engine بعد كل رد ناجح)
 # ============================================================
@@ -247,8 +285,6 @@ def parse_classification(text, valid_ids):
             ok = False
         out.setdefault(i, (ok, key if ok else None, str(it.get("title") or "")[:120] or None))
     return out
-
-
 def classify_pending():
     done = 0
     for _ in range(MAX_BATCHES_PER_RUN):
@@ -348,7 +384,6 @@ def make_proposal(t):
         samples = [(r[0] or "")[:200] for r in c.fetchall()]
     finally:
         conn.close()
-
     payload = {"topic_key": t["key"], "title": t["title"], "distinct_users": t["users"],
                "signals": t["signals"], "samples": samples}
     status, spec, note = "ready", None, None
@@ -401,11 +436,128 @@ def _auto_loop():
 
 
 # ============================================================
+# المرحلة 4: خطة التنفيذ (كتابة فقط، لا تعديل للكود)
+# ============================================================
+
+def code_index(max_chars=9000):
+    """فهرس حقيقي لملفات السيرفر (ملف ← مساراته ودوالّه) ليبني النموذج خطته عليه."""
+    import ast
+    base = os.path.dirname(os.path.abspath(__file__))
+    index = {}
+    for fn in sorted(os.listdir(base)):
+        if not fn.endswith(".py"):
+            continue
+        try:
+            with open(os.path.join(base, fn), encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+        except Exception:
+            continue
+        routes, funcs = [], []
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                if not node.name.startswith("__"):
+                    funcs.append(node.name)
+                for dec in node.decorator_list:
+                    if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
+                            and dec.func.attr == "route" and dec.args
+                            and isinstance(dec.args[0], ast.Constant)):
+                        routes.append(str(dec.args[0].value))
+        index[fn] = {"routes": routes[:40], "functions": funcs[:40]}
+    text = json.dumps(index, ensure_ascii=False)
+    while len(text) > max_chars and index:      # قصّ بالتدريج إن كبر الفهرس
+        for v in index.values():
+            v["functions"] = v["functions"][:-5] if len(v["functions"]) > 5 else v["functions"]
+        text = json.dumps(index, ensure_ascii=False)
+        if all(len(v["functions"]) <= 5 for v in index.values()):
+            break
+    return index
+
+
+def parse_plan(text, index):
+    data = _json(text)
+    if not isinstance(data.get("summary"), str) or not data["summary"].strip():
+        raise ValueError("plan missing summary")
+    files = []
+    for f in data.get("files") or []:
+        if not isinstance(f, dict) or not isinstance(f.get("path"), str):
+            continue
+        action = f.get("action") if f.get("action") in ("edit", "create") else "edit"
+        path = f["path"].strip()[:120]
+        files.append({"path": path, "action": action,
+                      "changes": str(f.get("changes") or "")[:600],
+                      # تحذير: ملف "تعديل" غير موجود فعلاً في السيرفر
+                      "unverified": action == "edit" and os.path.basename(path) not in index})
+    if not files:
+        raise ValueError("plan has no files")
+    data["files"] = files
+    for k in ("steps", "new_tables", "new_endpoints", "app_changes", "tests", "risks"):
+        data[k] = [str(x)[:400] for x in (data.get(k) or [])][:15]
+    for k in ("rollout", "rollback", "estimate"):
+        data[k] = str(data.get(k) or "")[:500]
+    brief = data.get("implementation_brief")
+    if not isinstance(brief, str) or not brief.strip():
+        raise ValueError("plan missing brief")
+    data["implementation_brief"] = brief[:6000]
+    return data
+
+
+def _plan_job(pid):
+    conn = _d["get_conn"]()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT topic_key, spec FROM feature_proposals WHERE id=%s", (pid,))
+        row = c.fetchone()
+    finally:
+        conn.close()
+    status, plan, note = "ready", None, None
+    try:
+        if not row or not row[1]:
+            raise ValueError("no spec")
+        index = code_index()
+        payload = {"proposal": row[1], "code_index": index}
+        text, _, _ = _d["run_internal"]("feature_plan_write",
+                                        json.dumps(payload, ensure_ascii=False))
+        plan = parse_plan(text, index)
+    except Exception as e:
+        print("FEATURE PLAN ERROR:", repr(e))
+        status, note = "error", ("فشل كتابة الخطة: " + str(e))[:300]
+    conn = _d["get_conn"]()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE feature_proposals SET plan=%s::jsonb, plan_status=%s, plan_note=%s WHERE id=%s",
+                  (json.dumps(plan, ensure_ascii=False) if plan else None, status, note, pid))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def start_plan(pid):
+    conn = _d["get_conn"]()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE feature_proposals SET plan_status='writing', plan_note=NULL "
+                  "WHERE id=%s AND status='approved' AND (plan_status IS NULL OR plan_status<>'writing')",
+                  (pid,))
+        ok = c.rowcount > 0
+        conn.commit()
+    finally:
+        conn.close()
+    if ok:
+        threading.Thread(target=_plan_job, args=(pid,), daemon=True).start()
+    return ok
+
+
+# ============================================================
 # العرض
 # ============================================================
 
 def _e(x):
     return html.escape(str(x if x is not None else ""))
+
+
 LEVEL_AR = {"low": "منخفض", "medium": "متوسط", "high": "عالٍ"}
 STATUS_AR = {"ready": "جاهز للمراجعة", "approved": "موافَق عليه (بانتظار التنفيذ)",
              "rejected": "مرفوض", "error": "لم يكتمل"}
@@ -474,6 +626,41 @@ def _form(pid, action, label, cls, key, confirm=None):
             f"<input type='hidden' name='action' value='{action}'><button class='btn {cls}'>{label}</button></form>")
 
 
+def _render_plan(p, key):
+    k = quote(key)
+    ps, plan = p.get("plan_status"), p.get("plan")
+    out = ["<h2>خطة التنفيذ</h2>"]
+    if ps == "writing":
+        out.append("<div class='card'>تُكتب الخطة الآن... حدّث الصفحة بعد دقيقة.</div>")
+    elif ps == "error":
+        out.append(f"<div class='card warn'>{_e(p.get('plan_note'))}</div>")
+    if plan:
+        out.append(f"<div class='card'>{_e(plan.get('summary'))}"
+                   f"<div class='muted'>التقدير: {_e(plan.get('estimate'))}</div></div>")
+        out.append("<div class='card wrap'><table><tr><th>الملف</th><th>الإجراء</th><th>التغيير</th></tr>")
+        for f in plan.get("files", []):
+            warn = " <span class='bad'>⚠️ غير موجود في السيرفر</span>" if f.get("unverified") else ""
+            out.append(f"<tr><td dir='ltr'>{_e(f['path'])}{warn}</td><td>{_e(f['action'])}</td>"
+                    f"<td>{_e(f['changes'])}</td></tr>")
+        out.append("</table></div>")
+        for label, field in (("الخطوات", "steps"), ("جداول جديدة", "new_tables"),
+                             ("مسارات جديدة", "new_endpoints"),
+                             ("تعديلات تحتاج تحديث التطبيق (الموبايل)", "app_changes"),
+                             ("الاختبارات", "tests"), ("المخاطر", "risks")):
+            if plan.get(field):
+                out.append(f"<h2>{label}</h2><div class='card'>" +
+                           "".join(f"<div>• {_e(x)}</div>" for x in plan[field]) + "</div>")
+        out.append(f"<h2>النشر والتراجع</h2><div class='card'><div>النشر: {_e(plan.get('rollout'))}</div>"
+                   f"<div>التراجع: {_e(plan.get('rollback'))}</div></div>")
+        out.append("<h2>تعليمات جاهزة للمبرمج (انسخها)</h2><div class='card'>"
+                   f"<pre style='white-space:pre-wrap;direction:ltr;text-align:left;font-size:12px'>"
+                   f"{_e(plan.get('implementation_brief'))}</pre></div>")
+    if ps != "writing":
+        label = "أعد كتابة الخطة" if plan or ps == "error" else "اكتب خطة التنفيذ"
+        out.append(f"<div class='card'><a class='btn' href='/admin/features/plan?key={k}&id={p['id']}'>{label}</a></div>")
+    return "".join(out)
+
+
 def render_detail(p, key):
     k = quote(key)
     s = p["spec"] or {}
@@ -497,6 +684,8 @@ def render_detail(p, key):
         if s.get("risks"):
             out.append("<h2>المخاطر</h2><div class='card'>" +
                        "".join(f"<div>• {_e(r)}</div>" for r in s["risks"]) + "</div>")
+    if p["status"] == "approved":
+        out.append(_render_plan(p, key))
     out.append("<h2>القرار</h2><div class='card'>")
     if p["status"] == "ready":
         out.append(_form(p["id"], "approve", "وافق", "green", key))
@@ -511,11 +700,12 @@ def render_detail(p, key):
 # المسارات
 # ============================================================
 
-_COLS = "id, topic_key, status, users_count, signals_count, spec, note"
+_COLS = "id, topic_key, status, users_count, signals_count, spec, note, plan, plan_status, plan_note"
 
 
 def _row(r):
-    return dict(zip(["id", "topic_key", "status", "users_count", "signals_count", "spec", "note"], r))
+    return dict(zip(["id", "topic_key", "status", "users_count", "signals_count", "spec", "note",
+                     "plan", "plan_status", "plan_note"], r))
 
 
 @bp.route("/admin/features", methods=["GET"])
@@ -549,6 +739,8 @@ def admin_features():
     except Exception as e:
         print("FEATURES PAGE ERROR:", repr(e))
         return jsonify({"ok": False, "error": "Failed."}), 500
+
+
 @bp.route("/admin/features/process", methods=["GET"])
 def admin_features_process():
     if not _admin_ok():
@@ -560,6 +752,22 @@ def admin_features_process():
         print("FEATURES PROCESS ERROR:", repr(e))
         msg = "تعذّر التحديث الآن. حاول بعد قليل."
     return redirect(f"/admin/features?key={quote(key)}&msg={quote(msg)}")
+
+
+@bp.route("/admin/features/plan", methods=["GET"])
+def admin_features_plan():
+    if not _admin_ok():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 403
+    key = request.values.get("key", "")
+    try:
+        pid = int(request.args.get("id", ""))
+    except ValueError:
+        return jsonify({"ok": False, "error": "Invalid id"}), 400
+    try:
+        start_plan(pid)
+    except Exception as e:
+        print("FEATURES PLAN START ERROR:", repr(e))
+    return redirect(f"/admin/features?key={quote(key)}&id={pid}")
 
 
 @bp.route("/admin/features/decide", methods=["POST"])
