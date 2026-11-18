@@ -601,6 +601,7 @@ def ai_run_stream():
     user_id = g.user_id
     def generate():
         start = time.perf_counter()
+        parts = []
         try:
             stream = _get_client().models.generate_content_stream(
                 model=MODEL,
@@ -610,8 +611,14 @@ def ai_run_stream():
             for chunk in stream:
                 text = getattr(chunk, "text", None)
                 if text:
+                    parts.append(text)
                     yield text
             _log_run(run_id, user_id, p, round((time.perf_counter() - start) * 1000, 2), True)
+            try:
+                import feature_requests
+                feature_requests.capture(user_id, p["name"], p["contents"], "".join(parts))
+            except Exception:
+                pass
         except Exception as e:
             print("AI RUN STREAM ERROR:", repr(e))
             _log_run(run_id, user_id, p, round((time.perf_counter() - start) * 1000, 2),
