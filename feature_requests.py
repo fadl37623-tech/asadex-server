@@ -532,6 +532,13 @@ def _plan_job(pid):
         raise
     finally:
         conn.close()
+    if status == "ready" and os.environ.get("FEATURE_AUTOBUILD", "1") != "0":
+        try:
+            import feature_builder
+            if not feature_builder._missing(feature_builder._cfg()):
+                feature_builder.start_build(pid)
+        except Exception as e:
+            print("FEATURE AUTOBUILD SKIPPED:", repr(e))
 
 
 def start_plan(pid):
@@ -636,12 +643,12 @@ def _render_plan(p, key):
         out.append(f"<div class='card warn'>{_e(p.get('plan_note'))}</div>")
     if plan:
         out.append(f"<div class='card'>{_e(plan.get('summary'))}"
-                   f"<div class='muted'>التقدير: {_e(plan.get('estimate'))}</div></div>")
+                f"<div class='muted'>التقدير: {_e(plan.get('estimate'))}</div></div>")
         out.append("<div class='card wrap'><table><tr><th>الملف</th><th>الإجراء</th><th>التغيير</th></tr>")
         for f in plan.get("files", []):
             warn = " <span class='bad'>⚠️ غير موجود في السيرفر</span>" if f.get("unverified") else ""
             out.append(f"<tr><td dir='ltr'>{_e(f['path'])}{warn}</td><td>{_e(f['action'])}</td>"
-                    f"<td>{_e(f['changes'])}</td></tr>")
+                       f"<td>{_e(f['changes'])}</td></tr>")
         out.append("</table></div>")
         for label, field in (("الخطوات", "steps"), ("جداول جديدة", "new_tables"),
                              ("مسارات جديدة", "new_endpoints"),
@@ -655,6 +662,9 @@ def _render_plan(p, key):
         out.append("<h2>تعليمات جاهزة للمبرمج (انسخها)</h2><div class='card'>"
                    f"<pre style='white-space:pre-wrap;direction:ltr;text-align:left;font-size:12px'>"
                    f"{_e(plan.get('implementation_brief'))}</pre></div>")
+    if plan:
+        out.append(f"<div class='card'><a class='btn green' href='/admin/builds/new?key={k}&id={p['id']}'>"
+                   f"ابنِ الكود</a> <a href='/admin/builds?key={k}'>كل المحاولات</a></div>")
     if ps != "writing":
         label = "أعد كتابة الخطة" if plan or ps == "error" else "اكتب خطة التنفيذ"
         out.append(f"<div class='card'><a class='btn' href='/admin/features/plan?key={k}&id={p['id']}'>{label}</a></div>")
@@ -701,8 +711,6 @@ def render_detail(p, key):
 # ============================================================
 
 _COLS = "id, topic_key, status, users_count, signals_count, spec, note, plan, plan_status, plan_note"
-
-
 def _row(r):
     return dict(zip(["id", "topic_key", "status", "users_count", "signals_count", "spec", "note",
                      "plan", "plan_status", "plan_note"], r))
@@ -783,15 +791,22 @@ def admin_features_decide():
     if action not in ("approve", "reject"):
         return jsonify({"ok": False, "error": "Invalid action"}), 400
     status = "approved" if action == "approve" else "rejected"
+    changed = False
     conn = _d["get_conn"]()
     try:
         c = conn.cursor()
         c.execute("UPDATE feature_proposals SET status=%s, decided_at=NOW() "
                   "WHERE id=%s AND status='ready'", (status, pid))
+        changed = c.rowcount > 0
         conn.commit()
     except Exception as e:
         conn.rollback()
         print("FEATURES DECIDE ERROR:", repr(e))
     finally:
         conn.close()
+    if changed and status == "approved":
+        try:
+            start_plan(pid)
+        except Exception as e:
+            print("FEATURES AUTOPLAN ERROR:", repr(e))
     return redirect(f"/admin/features?key={quote(key)}&id={pid}")
