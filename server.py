@@ -3970,6 +3970,8 @@ import improver
 improver.init(app, get_conn, prompt_engine, evaluator, analyzer)
 import feature_requests
 feature_requests.init(app, get_conn, prompt_engine.run_internal)
+import feature_builder
+feature_builder.init(app, get_conn, prompt_engine.run_internal)
 
 def _retired_ai_endpoint():
     print("LEGACY AI ENDPOINT CALLED:", request.path)
