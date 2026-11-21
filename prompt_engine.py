@@ -384,6 +384,10 @@ def run_internal(prompt_name, user_input):
         if not text:
             raise RuntimeError("empty answer")
         _log_run(run_id, None, p, round((time.perf_counter() - start) * 1000, 2), True)
+        try:
+            import monitor; monitor.record_usage(run_id, response)
+        except Exception:
+            pass
         return text, active["version"], run_id
     except Exception as e:
         _log_run(run_id, None, p, round((time.perf_counter() - start) * 1000, 2),
@@ -560,7 +564,10 @@ def ai_run():
             raise RuntimeError("empty answer")
         ms = round((time.perf_counter() - start) * 1000, 2)
         _log_run(run_id, g.user_id, p, ms, True)
-
+        try:
+            import monitor; monitor.record_usage(run_id, response)
+        except Exception:
+            pass
         try:
             import feature_requests
             feature_requests.capture(g.user_id, p["name"], p["contents"], answer)
@@ -608,12 +615,18 @@ def ai_run_stream():
                 contents=p["contents"],
                 config=_gen_config(p["system"], p["cfg"]),
             )
+            last = None
             for chunk in stream:
+                last = chunk
                 text = getattr(chunk, "text", None)
                 if text:
                     parts.append(text)
                     yield text
             _log_run(run_id, user_id, p, round((time.perf_counter() - start) * 1000, 2), True)
+            try:
+                import monitor; monitor.record_usage(run_id, response)
+            except Exception:
+                pass
             try:
                 import feature_requests
                 feature_requests.capture(user_id, p["name"], p["contents"], "".join(parts))
