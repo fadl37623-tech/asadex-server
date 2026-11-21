@@ -577,13 +577,15 @@ def render_list(rows, message, key):
     return "".join(out)
 
 
-def render_detail(b, key):
+def render_detail(b, key, message=None):
     k = quote(key)
     cfg = _cfg()
     out = [HEAD, f"<h1>محاولة #{b['id']} للاقتراح #{b['proposal_id']}</h1>",
            f"<div class='muted'>الحالة: {_e(STATUS_AR.get(b['status'], b['status']))}</div>",
            f"<p><a href='?key={k}'>← رجوع</a> | "
            f"<a href='/admin/features?key={k}&id={b['proposal_id']}'>صفحة الاقتراح</a></p>"]
+    if message:
+        out.append(f"<div class='card warn'><b>نتيجة آخر إجراء:</b> {_e(message)}</div>")
     if b.get("note"):
         out.append(f"<div class='card warn'>{_e(b['note'])}</div>")
     if b.get("summary"):
@@ -640,7 +642,8 @@ def admin_builds():
             b = _load(int(bid))
             if not b:
                 return jsonify({"ok": False, "error": "Not found"}), 404
-            return Response(render_detail(b, key), mimetype="text/html; charset=utf-8")
+            return Response(render_detail(b, key, request.args.get("msg")),
+                            mimetype="text/html; charset=utf-8")
         conn = _d["get_conn"]()
         try:
             c = conn.cursor()
@@ -721,7 +724,7 @@ def admin_builds_decide():
         return back(str(e))
     except Exception as e:
         print("BUILD DECIDE ERROR:", repr(e))
-        return back("حدث خطأ.")
+        return back("حدث خطأ: " + type(e).__name__ + " " + str(e)[:150])
     return back()
 
 
