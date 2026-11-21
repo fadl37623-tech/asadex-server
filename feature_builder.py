@@ -255,6 +255,25 @@ def apply_changes(bases, edits, creates, allowed):
     return changes, problems
 
 
+def _strip_docstrings(tree):
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if (isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and isinstance(body, list) and body and isinstance(body[0], ast.Expr)
+                and isinstance(getattr(body[0], "value", None), ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            node.body = body[1:] or [ast.Pass()]
+    return tree
+
+
+def functionally_same(old, new):
+    """True إذا لم يتغير سلوك الكود: الفرق تعليقات أو نصوص توثيق فقط."""
+    try:
+        return ast.dump(_strip_docstrings(ast.parse(old))) == ast.dump(_strip_docstrings(ast.parse(new)))
+    except SyntaxError:
+        return False
+
+
 def changed_lines(old, new):
     n = 0
     for line in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0):
@@ -277,8 +296,7 @@ def run_checks(changes):
             ast.parse(ch["new"])
             checks.append({"check": "syntax", "file": path, "passed": True, "detail": "ok"})
         except SyntaxError as e:
-            checks.append({"check": "syntax", "file": path, "passed": False,
-                           "detail": f"سطر {e.lineno}: {e.msg}"})
+            checks.append({"check": "syntax", "file": path, "passed": False, "detail": f"سطر {e.lineno}: {e.msg}"})
         n = changed_lines(ch["old"], ch["new"])
         total += n
         # الكلمات الممنوعة تُفحص في الأسطر المضافة فقط
@@ -343,14 +361,17 @@ def _build_job(bid, proposal_id):
         conn = _d["get_conn"]()
         try:
             c = conn.cursor()
-            c.execute("SELECT spec, plan FROM feature_proposals WHERE id=%s AND status='approved'",
+            c.execute("SELECT spec, plan, topic_key FROM feature_proposals WHERE id=%s AND status='approved'",
                       (proposal_id,))
             row = c.fetchone()
         finally:
             conn.close()
         if not row or not row[0] or not row[1]:
             raise ValueError("الاقتراح غير موافَق عليه أو لا توجد له خطة")
-        spec, plan = row
+        spec, plan, topic_key = row
+        if str(topic_key or "").endswith("_ui_problem"):
+            raise ValueError("هذه مشكلة في واجهة التطبيق (الموبايل). كود السيرفر لا يغيّرها، "
+                             "فلا يُبنى لها شيء هنا. تحتاج تعديلاً في كود التطبيق نفسه.")
 
         plan_files = plan.get("files") or []
         if not plan_files or len(plan_files) > MAX_FILES:
@@ -381,9 +402,27 @@ def _build_job(bid, proposal_id):
                                               "new_endpoints", "implementation_brief")},
             "files": context,
         }
-        raw, _, _ = _d["run_internal"]("feature_code_write", json.dumps(payload, ensure_ascii=False))
-        summary, edits, creates = parse_code_output(raw)
-        changes, problems = apply_changes(bases, edits, creates, allowed)
+        summary, changes, problems = "", [], []
+        for attempt in (1, 2):
+            if attempt == 2:
+                payload["retry"] = {
+                    "your_previous_answer_failed": "؛ ".join(problems[:5]),
+                    "instruction": ("Answer again in the same format. Every OLD block must be copied "
+                                    "character for character from the given files (same indentation) "
+                                    "and occur exactly once. Prefer a short OLD block that contains "
+                                    "one unique line."),
+                }
+            raw, _, _ = _d["run_internal"]("feature_code_write", json.dumps(payload, ensure_ascii=False))
+            try:
+                summary, edits, creates = parse_code_output(raw)
+            except ValueError as e:
+                if "رفض التنفيذ" in str(e):
+                    raise
+                problems = [str(e)]
+                continue
+            changes, problems = apply_changes(bases, edits, creates, allowed)
+            if not problems:
+                break
         for ch in changes:
             ch["crlf"] = bool(crlf.get(ch["path"]))
         if problems:
@@ -392,6 +431,8 @@ def _build_job(bid, proposal_id):
             return
         if not changes:
             raise ValueError("لم يتغير أي ملف")
+        if all(ch["action"] == "edit" and functionally_same(ch["old"], ch["new"]) for ch in changes):
+            raise ValueError("التعديل بلا أثر: تعليقات أو نصوص توثيق فقط، ولا يغيّر سلوك السيرفر.")
         checks = run_checks(changes)
         if all_passed(checks):
             _set(bid, status="ready", summary=summary, changes=changes, checks=checks,
@@ -477,6 +518,7 @@ def push_staging(b):
         r = _gh(cfg, "POST", "/git/refs", json={"ref": f"refs/heads/{st}", "sha": main_sha})
     if r.status_code not in (200, 201):
         raise GhError(f"تعذّر تجهيز فرع {st} ({r.status_code})")
+
     last = None
     for ch in b["changes"]:
         _, sha, _ = fetch_file(cfg, ch["path"], st)
@@ -521,8 +563,6 @@ def rollback_main(b):
             json={"sha": b["main_before_sha"], "force": True})
     if r.status_code != 200:
         raise GhError(f"تعذّر التراجع ({r.status_code})")
-
-
 # ============================================================
 # العرض
 # ============================================================
@@ -672,8 +712,6 @@ def admin_builds():
     except Exception as e:
         print("BUILDS PAGE ERROR:", repr(e))
         return jsonify({"ok": False, "error": "Failed."}), 500
-
-
 @bp.route("/admin/builds/new", methods=["GET"])
 def admin_builds_new():
     if not _admin_ok():
