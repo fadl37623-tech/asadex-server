@@ -36,6 +36,9 @@ MAX_FILES = 5
 MAX_CHANGED_LINES = 400
 MAX_CONTEXT_CHARS = 300_000
 FORBIDDEN_FILES = {"feature_builder.py"}
+# ملفات أساسية: يُسمح بالإضافة فقط، وأي حذف أو تغيير لسطر موجود يُفشل الفحص
+PROTECTED_FILES = {"server.py", "app.py", "prompt_engine.py", "evaluator.py", "improver.py",
+                   "analyzer.py", "prompt_seeds.py", "eval_cases.py", "feature_requests.py"}
 SAFE_PATH = re.compile(r"^[A-Za-z0-9_]+\.py$")
 DENY_PATTERNS = [
     (r"\bsubprocess\b", "subprocess"),
@@ -79,8 +82,6 @@ Rules:
 - Match the surrounding code style. Keep comments short.
 - If the plan cannot be implemented safely under these rules, output exactly ===CANNOT=== followed by one Arabic sentence explaining why, and nothing else.
 """
-
-
 # ============================================================
 # Setup
 # ============================================================
@@ -89,6 +90,8 @@ def init(app, get_conn, run_internal):
     _d.update(get_conn=get_conn, run_internal=run_internal)
     _create_tables()
     app.register_blueprint(bp)
+
+
 def _create_tables():
     conn = None
     try:
@@ -198,11 +201,12 @@ def _ref_sha(cfg, branch):
 # ============================================================
 # تحليل مخرجات النموذج وتطبيقها (منطق خالص)
 # ============================================================
-
 _EDIT_RE = re.compile(
     r"===EDIT\s+(\S+?)\s*===\s*\n<<<<<<< OLD\n(.*?)\n=======\n(.*?)\n>>>>>>> NEW", re.S)
 _CREATE_RE = re.compile(r"===CREATE\s+(\S+?)\s*===\s*\n(.*?)\n===END_FILE===", re.S)
 _SUMMARY_RE = re.compile(r"===SUMMARY===\s*(.*?)\s*===END_SUMMARY===", re.S)
+
+
 def parse_code_output(text):
     text = text or ""
     if "===CANNOT===" in text:
@@ -285,6 +289,13 @@ def run_checks(changes):
         bad = [label for rx, label in DENY_PATTERNS if re.search(rx, added)]
         checks.append({"check": "deny_list", "file": path, "passed": not bad,
                        "detail": ("ممنوع: " + ", ".join(bad)) if bad else "ok"})
+        if path in PROTECTED_FILES:
+            removed = [l for l in difflib.unified_diff(ch["old"].splitlines(), ch["new"].splitlines(),
+                                                       lineterm="", n=0)
+                       if l.startswith("-") and not l.startswith("---")]
+            checks.append({"check": "protected", "file": path, "passed": not removed,
+                           "detail": (f"حذف/تغيير {len(removed)} سطر في ملف أساسي (إضافة فقط مسموحة)")
+                           if removed else "ok"})
     checks.append({"check": "size", "file": "", "passed": total <= MAX_CHANGED_LINES,
                    "detail": f"{total} سطراً تغيّر (الحد {MAX_CHANGED_LINES})"})
     return checks
@@ -297,6 +308,7 @@ def all_passed(checks):
 # ============================================================
 # كتابة الكود (خيط خلفي)
 # ============================================================
+
 def _set(bid, **fields):
     json_cols = {"changes", "checks"}
     sets, vals = [], []
@@ -394,6 +406,8 @@ def _build_job(bid, proposal_id):
             _set(bid, status="error", raw=(raw or "")[:30000], note=("فشل: " + str(e))[:400])
         except Exception as e2:
             print("BUILD SET ERROR:", repr(e2))
+
+
 def start_build(proposal_id):
     conn = _d["get_conn"]()
     try:
@@ -463,7 +477,6 @@ def push_staging(b):
         r = _gh(cfg, "POST", "/git/refs", json={"ref": f"refs/heads/{st}", "sha": main_sha})
     if r.status_code not in (200, 201):
         raise GhError(f"تعذّر تجهيز فرع {st} ({r.status_code})")
-
     last = None
     for ch in b["changes"]:
         _, sha, _ = fetch_file(cfg, ch["path"], st)
@@ -562,7 +575,7 @@ def _form(bid, action, label, cls, key, confirm=None):
 def render_list(rows, message, key):
     k = quote(key)
     out = [HEAD, "<h1>بناء الميزات</h1>",
-            "<div class='muted'>النظام يكتب الكود. أنت توافق مرتين: على الكود، ثم على النشر.</div>"]
+           "<div class='muted'>النظام يكتب الكود. أنت توافق مرتين: على الكود، ثم على النشر.</div>"]
     if message:
         out.append(f"<div class='card warn'>{_e(message)}</div>")
     if rows:
