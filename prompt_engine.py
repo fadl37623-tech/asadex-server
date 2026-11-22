@@ -555,6 +555,14 @@ def ai_run():
     if err:
         return err
 
+    try:
+        import budget
+        blocked = budget.check_user(g.user_id, p["name"])
+    except Exception:
+        blocked = None
+    if blocked:
+        return jsonify(blocked), 429
+
     run_id = uuid.uuid4().hex
     start = time.perf_counter()
     try:
@@ -581,6 +589,11 @@ def ai_run():
             "prompt_name": p["name"],
             "prompt_version": p["version"],
         }
+        try:
+            out["quota"] = budget.quota(g.user_id)
+        except Exception:
+            pass
+    
         if p["cfg"].get("google_search"):
             out["grounding_sources"] = _grounding_sources(response)
         return jsonify(out)
@@ -606,6 +619,15 @@ def ai_run_stream():
 
     run_id = uuid.uuid4().hex
     user_id = g.user_id
+
+    try:
+        import budget
+        blocked = budget.check_user(g.user_id, p["name"])
+    except Exception:
+        blocked = None
+    if blocked:
+        return Response(json.dumps(blocked, ensure_ascii=False), status=429, mimetype="application/json")
+
     def generate():
         start = time.perf_counter()
         parts = []

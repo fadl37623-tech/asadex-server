@@ -3974,6 +3974,8 @@ import feature_builder
 feature_builder.init(app, get_conn, prompt_engine.run_internal)
 import monitor
 monitor.init(app, get_conn, prompt_engine)
+import budget
+budget.init(app, get_conn, require_auth)
 
 def _retired_ai_endpoint():
     print("LEGACY AI ENDPOINT CALLED:", request.path)
