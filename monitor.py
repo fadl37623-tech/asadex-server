@@ -161,8 +161,8 @@ def collect():
     try:
         c = conn.cursor()
         c.execute("""
-            SELECT prompt_name, version, status, activated_at FROM prompts
-            ORDER BY prompt_name, version
+            SELECT name, version, status, activated_at FROM prompts
+            ORDER BY name, version
         """)
         meta = {}
         for n, v, st, ac in c.fetchall():
@@ -316,7 +316,7 @@ def admin_monitor():
                         mimetype="text/html; charset=utf-8")
     except Exception as e:
         print("MONITOR PAGE ERROR:", repr(e))
-        return jsonify({"ok": False, "error": "Failed."}), 500
+        return jsonify({"ok": False, "error": "Failed.", "detail": repr(e)[:200]}), 500
 
 
 @bp.route("/admin/monitor/rollback", methods=["POST"])
