@@ -148,6 +148,37 @@ def evaluate(prev, act):
     return out
 
 
+FEATURES = [
+    ("سؤال دردشة", ["chat_concise", "chat_detailed"], "avg"),
+    ("خطة دراسة", ["plan_create", "plan_create_lecture"], "avg"),
+    ("اختبار", ["quiz_make", "quiz_make_lecture"], "avg"),
+    ("متابعة (Similar/Challenge/Simpler/Summary)",
+     ["followup_similar", "followup_challenge", "followup_simpler", "followup_summary"], "avg"),
+    ("تحليل محاضرة/ملف", ["lecture_summary"], "avg"),
+    ("رسم بياني", ["diagram_plan"], "avg"),
+    ("تقرير (التوليد + البحث عن المصادر)", ["report_generate", "source_search"], "sum"),
+]
+
+
+def feature_costs(per_prompt):
+    """per_prompt: {name: {"runs","avg","max"}}. يرجع تكلفة كل ميزة (متوسط، أقصى)."""
+    out = []
+    for label, names, mode in FEATURES:
+        rows = [per_prompt[n] for n in names if n in per_prompt and per_prompt[n]["runs"]]
+        if not rows:
+            out.append({"label": label, "runs": 0, "avg": None, "max": None})
+            continue
+        if mode == "sum":
+            avg, mx = sum(r["avg"] for r in rows), sum(r["max"] for r in rows)
+        else:
+            total = sum(r["runs"] for r in rows)
+            avg = sum(r["avg"] * r["runs"] for r in rows) / total
+            mx = max(r["max"] for r in rows)
+        runs = max(r["runs"] for r in rows) if mode == "sum" else sum(r["runs"] for r in rows)
+        out.append({"label": label, "runs": runs, "avg": avg, "max": mx})
+    return out
+
+
 def cost_usd(tin, tout):
     return ((tin or 0) * _price_in() + (tout or 0) * _price_out()) / 1_000_000
 
@@ -167,7 +198,6 @@ def collect():
         meta = {}
         for n, v, st, ac in c.fetchall():
             meta.setdefault(n, {})[v] = {"status": st, "activated_at": ac.isoformat() if ac else None}
-
         c.execute("""
             SELECT prompt_name, prompt_version,
                    COUNT(*) FILTER (WHERE NOT cached),
@@ -192,7 +222,7 @@ def collect():
             for v, m in sorted(versions.items()):
                 r = runs.get((name, v), {"runs": 0, "failed": 0, "lat": None, "tin": 0, "tout": 0})
                 f = fb.get((name, v), {"ratings": 0, "neg": 0})
-                rows.append({"version": v, **m, **r, **f, "cost": cost_usd(r["tin"], r["tout"])})
+                rows.append({"version": v, m, r, **f, "cost": cost_usd(r["tin"], r["tout"])})
             active = next((x for x in rows if x["status"] == "active"), None)
             prev = None
             if active:
@@ -223,8 +253,30 @@ def collect():
         trend = sorted(days.values(), key=lambda x: x["day"], reverse=True)
         for t in trend:
             t["cost"] = cost_usd(t["tin"], t["tout"])
+        pin, pout = _price_in(), _price_out()
+        c.execute("""
+            SELECT prompt_name, COUNT(*), AVG(c), MAX(c), AVG(ti), AVG(tou)
+            FROM (SELECT prompt_name,
+                         (COALESCE(tokens_in, 0) * %s + COALESCE(tokens_out, 0) * %s) / 1000000.0 AS c,
+                         COALESCE(tokens_in, 0) AS ti, COALESCE(tokens_out, 0) AS tou
+                  FROM prompt_runs
+                  WHERE success AND NOT cached AND tokens_in IS NOT NULL
+                    AND created_at > NOW() - INTERVAL '30 days') t
+            GROUP BY prompt_name ORDER BY 3 DESC
+        """, (pin, pout))
+        per_prompt = {n: {"runs": r, "avg": float(a), "max": float(m), "tin": float(ti), "tout": float(to)}
+                      for n, r, a, m, ti, to in c.fetchall()}
+        c.execute("""
+            SELECT created_at, prompt_name, prompt_version, tokens_in, tokens_out, latency_ms, success
+            FROM prompt_runs WHERE NOT cached ORDER BY created_at DESC LIMIT 20
+        """)
+        recent = [{"at": at.strftime("%m-%d %H:%M:%S") if at else "", "prompt": n, "version": v,
+                   "tin": ti, "tout": to, "lat": float(l) if l is not None else None, "ok": ok,
+                   "cost": cost_usd(ti, to) if ti is not None or to is not None else None}
+                  for at, n, v, ti, to, l, ok in c.fetchall()]
         return {"prompts": prompts, "trend": trend,
-                "tokens_tracked": any(t["tin"] or t["tout"] for t in trend)}
+                "tokens_tracked": any(t["tin"] or t["tout"] for t in trend),
+                "per_prompt": per_prompt, "features": feature_costs(per_prompt), "recent": recent}
     finally:
         conn.close()
 
@@ -265,6 +317,7 @@ def render(data, message, key):
     if not data["tokens_tracked"]:
         out.append("<div class='card warn'>التكلفة غير متاحة بعد: لم تُسجَّل توكنات. أضف استدعاء "
                    "<code>monitor.record_usage</code> في prompt_engine (انظر التعليمات).</div>")
+
     for p in data["prompts"]:
         out.append(f"<h2>{_e(p['name'])}</h2>")
         for a in p["alerts"]:
@@ -289,6 +342,30 @@ def render(data, message, key):
                 f"<input type='hidden' name='version' value='{p['prev']['version']}'>"
                 f"<button class='btn'>تراجع إلى v{p['prev']['version']}</button></form>")
         out.append("</div>")
+
+    out.append("<h2>تكلفة كل ميزة (متوسط آخر 30 يوماً)</h2>")
+    out.append("<div class='card wrap'><table><tr><th>الميزة</th><th>طلبات</th><th>المتوسط</th><th>الأعلى</th></tr>")
+    for f in data["features"]:
+        if f["avg"] is None:
+            out.append(f"<tr><td>{_e(f['label'])}</td><td>0</td><td>-</td><td>-</td></tr>")
+        else:
+            out.append(f"<tr><td>{_e(f['label'])}</td><td>{f['runs']}</td>"
+                       f"<td>${f['avg']:.4f}</td><td>${f['max']:.4f}</td></tr>")
+    out.append("</table><div class='muted'>لا يشمل رسم بحث Google (يُحسب لكل طلب بحث مؤهَّل بعد الحد المجاني، "
+               "تحقق من صفحة التسعير). والمتوسط يخلط الطلبات النصية بالمصورة في الدردشة، فاستعمل جدول "
+               "'آخر الطلبات' لقياس الصور والملفات منفردة.</div></div>")
+
+    out.append("<h2>آخر 20 طلباً (للقياس المباشر)</h2>")
+    out.append("<div class='card wrap'><table><tr><th>الوقت</th><th>Prompt</th><th>توكن دخل</th>"
+               "<th>توكن خرج</th><th>تكلفة</th><th>زمن (ث)</th></tr>")
+    for r in data["recent"]:
+        cost = f"${r['cost']:.4f}" if r["cost"] is not None else "-"
+        lat = f"{r['lat'] / 1000:.1f}" if r["lat"] else "-"
+        bad = "" if r["ok"] else " class='bad'"
+        out.append(f"<tr{bad}><td>{_e(r['at'])}</td><td>{_e(r['prompt'])} v{r['version']}</td>"
+                   f"<td>{r['tin'] if r['tin'] is not None else '-'}</td>"
+                   f"<td>{r['tout'] if r['tout'] is not None else '-'}</td><td>{cost}</td><td>{lat}</td></tr>")
+    out.append("</table></div>")
 
     out.append("<h2>آخر 14 يوماً</h2>")
     if data["trend"]:
