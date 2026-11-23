@@ -222,7 +222,7 @@ def collect():
             for v, m in sorted(versions.items()):
                 r = runs.get((name, v), {"runs": 0, "failed": 0, "lat": None, "tin": 0, "tout": 0})
                 f = fb.get((name, v), {"ratings": 0, "neg": 0})
-                rows.append({"version": v, m, r, **f, "cost": cost_usd(r["tin"], r["tout"])})
+                rows.append({"version": v, **m, **r, **f, "cost": cost_usd(r["tin"], r["tout"])})
             active = next((x for x in rows if x["status"] == "active"), None)
             prev = None
             if active:
