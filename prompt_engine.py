@@ -631,22 +631,25 @@ def ai_run_stream():
     def generate():
         start = time.perf_counter()
         parts = []
+        last = None
         try:
             stream = _get_client().models.generate_content_stream(
                 model=MODEL,
                 contents=p["contents"],
                 config=_gen_config(p["system"], p["cfg"]),
             )
-            last = None
             for chunk in stream:
-                last = chunk
+                if getattr(chunk, "usage_metadata", None):
+                    last = chunk
                 text = getattr(chunk, "text", None)
                 if text:
                     parts.append(text)
                     yield text
             _log_run(run_id, user_id, p, round((time.perf_counter() - start) * 1000, 2), True)
             try:
-                import monitor; monitor.record_usage(run_id, response)
+                import monitor
+                if last is not None:
+                    monitor.record_usage(run_id, last)
             except Exception:
                 pass
             try:
