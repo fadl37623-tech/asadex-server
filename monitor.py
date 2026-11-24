@@ -16,6 +16,7 @@ SciGo Monitor (المرحلة 8): هل رفعت التحسينات رضا الم
   تحقق من أسعار نموذجك الحالي في صفحة أسعار Gemini، فقد تتغير.
 """
 
+import concurrent.futures
 import html
 import math
 import os
@@ -222,7 +223,7 @@ def collect():
             for v, m in sorted(versions.items()):
                 r = runs.get((name, v), {"runs": 0, "failed": 0, "lat": None, "tin": 0, "tout": 0})
                 f = fb.get((name, v), {"ratings": 0, "neg": 0})
-                rows.append({"version": v, **m, **r, **f, "cost": cost_usd(r["tin"], r["tout"])})
+                rows.append({"version": v, m, r, **f, "cost": cost_usd(r["tin"], r["tout"])})
             active = next((x for x in rows if x["status"] == "active"), None)
             prev = None
             if active:
@@ -318,6 +319,19 @@ def render(data, message, key):
         out.append("<div class='card warn'>التكلفة غير متاحة بعد: لم تُسجَّل توكنات. أضف استدعاء "
                    "<code>monitor.record_usage</code> في prompt_engine (انظر التعليمات).</div>")
 
+    st = data.get("source_trim")
+    if st:
+        if st["trimmed"]:
+            out.append(f"<div class='card ok'>بحث المصادر: وضع التوفير مفعّل (v{st['version']}).</div>")
+        else:
+            out.append("<div class='card warn'><b>بحث المصادر يستهلك نحو 40% من تكلفة التقرير.</b> "
+                       "يمكن إنشاء نسخة بلا تفكير وبجواب قصير (60 كلمة) توفّر معظمها، وتبقى المصادر كما هي "
+                       "لأنها تأتي من بحث Google وليست من الجواب. "
+                       "<form method='post' action='/admin/monitor/trim-source' style='margin-top:8px' "
+                       "onsubmit=\"return confirm('ستُنشأ نسخة جديدة وتُفعَّل، ويمكن التراجع منها. متابعة؟')\">"
+                       f"<input type='hidden' name='key' value='{_e(key)}'>"
+                       "<button class='btn'>قلّل تكلفة بحث المصادر</button></form></div>")
+
     for p in data["prompts"]:
         out.append(f"<h2>{_e(p['name'])}</h2>")
         for a in p["alerts"]:
@@ -381,12 +395,55 @@ def render(data, message, key):
     return "".join(out)
 
 
+TRIM_NOTE = ("\n\nCost control: keep your answer under 60 words. Do not write long explanations; "
+             "the search results themselves are what matters, not the length of your answer.")
+def trim_source_prompt(engine):
+    """ينشئ نسخة أرخص من source_search (بلا تفكير + جواب قصير) ويفعّلها. يرجع رسالة عربية."""
+    active = engine.get_active("source_search")
+    if not active:
+        return "الـ prompt source_search غير موجود."
+    cfg = dict(active.get("config") or {})
+    if cfg.get("thinking_budget") == 0:
+        return f"مفعّل مسبقاً (النسخة v{active['version']})."
+    cfg["thinking_budget"] = 0
+    text = active["text"].rstrip()
+    if "Cost control:" not in text:
+        text += TRIM_NOTE
+    version = engine.create_draft("source_search", text, cfg,
+                                  notes="cost trim: thinking off, short answer", source="engine")
+    if not engine.activate_version("source_search", version):
+        return "أُنشئت النسخة لكن تعذّر تفعيلها."
+    return (f"فُعّلت النسخة v{version}: بلا تفكير وبجواب قصير. أنشئ تقريراً للتجربة وتأكد أن المصادر "
+            "ما زالت تظهر، وإن ساءت فاضغط تراجع في جدول source_search.")
+
+
+@bp.route("/admin/monitor/trim-source", methods=["POST"])
+def admin_monitor_trim_source():
+    if not _admin_ok():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 403
+    key = request.values.get("key", "")
+    try:
+        msg = trim_source_prompt(_d["engine"])
+    except Exception as e:
+        print("MONITOR TRIM ERROR:", repr(e))
+        msg = "حدث خطأ أثناء إنشاء النسخة."
+    return redirect(f"/admin/monitor?key={quote(key)}&msg={quote(msg)}")
+
+
 @bp.route("/admin/monitor", methods=["GET"])
 def admin_monitor():
     if not _admin_ok():
         return jsonify({"ok": False, "error": "Unauthorized"}), 403
     try:
         data = collect()
+        try:
+            a = _d["engine"].get_active("source_search")
+            data["source_trim"] = ({"version": a["version"],
+                                    "trimmed": (a.get("config") or {}).get("thinking_budget") == 0}
+                                   if a else None)
+        except Exception as e:
+            print("MONITOR SOURCE STATE ERROR:", repr(e))
+            data["source_trim"] = None
         if request.args.get("format") == "json":
             return jsonify({"ok": True, **data})
         return Response(render(data, request.args.get("msg"), request.values.get("key", "")),
@@ -413,3 +470,157 @@ def admin_monitor_rollback():
         print("MONITOR ROLLBACK ERROR:", repr(e))
         msg = "حدث خطأ أثناء التراجع."
     return redirect(f"/admin/monitor?key={quote(key)}&msg={quote(msg)}")
+
+
+# ============================================================
+# مختبر تقليل تكلفة بحث المصادر (source_search)
+# يختبر النسخة الفعّالة ومسودة أرخص على الموضوع نفسه قبل أن تفعّل شيئاً.
+# ============================================================
+
+SOURCES_PROMPT = "source_search"
+CHEAP_NOTE = "cheaper-sources"
+CHEAP_SUFFIX = (
+    "\n\nOUTPUT LIMIT: Keep your written answer under 80 words. Do not explain at length. "
+    "The web sources you find matter more than the text of the answer.\n"
+)
+LAB_TOPICS = ["Newton's second law", "Quadratic equations", "Periodic table"]
+def make_cheaper(text, config):
+    """نسخة أرخص: جواب قصير + إيقاف التفكير. (دالة خالصة)"""
+    cfg = dict(config or {})
+    cfg["thinking_budget"] = 0
+    cfg["google_search"] = True
+    new_text = text if CHEAP_SUFFIX.strip() in text else text.rstrip() + CHEAP_SUFFIX
+    return new_text, cfg
+
+
+def _find_draft():
+    conn = _d["get_conn"]()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT version FROM prompts WHERE name=%s AND status='draft' AND notes=%s "
+                  "ORDER BY version DESC LIMIT 1", (SOURCES_PROMPT, CHEAP_NOTE))
+        row = c.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def _run_lab(version, topic):
+    """يشغّل نسخة محددة من source_search على موضوع، ويرجع المقاييس."""
+    engine = _d["engine"]
+    row = engine.get_version_row(SOURCES_PROMPT, version)
+    if not row:
+        return {"version": version, "error": "النسخة غير موجودة"}
+    p = {"name": SOURCES_PROMPT, "version": version, "system": row["text"],
+         "contents": f"Topic: {topic}\nImportant scientific concepts: {topic}\n"
+                     f"Related scientific concepts: {topic}\nTechnical keywords: {topic}",
+         "cfg": row["config"]}
+    start = import("time").perf_counter()
+    try:
+        resp = engine._generate(p)
+        u = getattr(resp, "usage_metadata", None)
+        tin = (getattr(u, "prompt_token_count", None) or 0) if u else 0
+        tout = ((getattr(u, "candidates_token_count", None) or 0) +
+                (getattr(u, "thoughts_token_count", None) or 0)) if u else 0
+        sources = engine._grounding_sources(resp)
+        return {"version": version, "sources": len(sources), "tin": tin, "tout": tout,
+                "cost": cost_usd(tin, tout), "chars": len(resp.text or ""),
+                "secs": round(import("time").perf_counter() - start, 1), "error": None}
+    except Exception as e:
+        return {"version": version, "error": (type(e).__name__ + ": " + str(e))[:150]}
+
+
+@bp.route("/admin/monitor/sources", methods=["GET"])
+def admin_sources():
+    if not _admin_ok():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 403
+    key = request.values.get("key", "")
+    k = quote(key)
+    try:
+        active = _d["engine"].get_active(SOURCES_PROMPT)
+        if not active:
+            return jsonify({"ok": False, "error": "source_search غير موجود"}), 404
+        draft = _find_draft()
+        out = [HEAD, "<h1>تقليل تكلفة بحث المصادر</h1>",
+               "<div class='muted'>اختبر نسخة أرخص جنباً إلى جنب مع الحالية قبل أن تفعّل أي شيء. "
+               "المهم أن يبقى عدد المصادر المُرجَعة قريباً من الحالية.</div>",
+               f"<div class='card'>النسخة الفعّالة: v{active['version']} | المسودة الأرخص: "
+               f"{'v' + str(draft) if draft else 'غير موجودة بعد'}</div>"]
+        if request.args.get("msg"):
+            out.append(f"<div class='card ok'>{_e(request.args.get('msg'))}</div>")
+        if not draft:
+            out.append(f"<form method='post' action='/admin/monitor/sources/draft'>"
+                       f"<input type='hidden' name='key' value='{_e(key)}'>"
+                       f"<button class='btn'>أنشئ المسودة الأرخص</button></form>")
+        else:
+            out.append("<div class='card'>اختر موضوع اختبار (يشغّل النسختين معاً، قد يستغرق 20 ثانية):<br>" +
+                       " | ".join(f"<a href='?key={k}&t={i}'>{_e(t)}</a>" for i, t in enumerate(LAB_TOPICS)) + "</div>")
+            t_raw = request.args.get("t")
+            if t_raw is not None and t_raw.isdigit() and int(t_raw) < len(LAB_TOPICS):
+                topic = LAB_TOPICS[int(t_raw)]
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    f1 = pool.submit(_run_lab, active["version"], topic)
+                    f2 = pool.submit(_run_lab, draft, topic)
+                    r1, r2 = f1.result(), f2.result()
+                out.append(f"<h2>النتيجة: {_e(topic)}</h2><div class='card wrap'><table>"
+                           "<tr><th>النسخة</th><th>مصادر</th><th>توكن دخل</th><th>توكن خرج</th>"
+                           "<th>تكلفة</th><th>طول الجواب</th><th>زمن (ث)</th></tr>")
+                for label, r in (("الحالية", r1), ("الأرخص", r2)):
+                    if r.get("error"):
+                        out.append(f"<tr><td>{label} v{r['version']}</td><td colspan='6' class='bad'>{_e(r['error'])}</td></tr>")
+                    else:
+                        out.append(f"<tr><td>{label} v{r['version']}</td><td>{r['sources']}</td><td>{r['tin']}</td>"
+                                   f"<td>{r['tout']}</td><td>${r['cost']:.4f}</td><td>{r['chars']}</td><td>{r['secs']}</td></tr>")
+                out.append("</table><div class='muted'>لا تفعّل المسودة إلا إذا كان عدد مصادر الأرخص قريباً من الحالية "
+                           "(ويفضل في موضوعين على الأقل) وكانت التكلفة أقل فعلاً.</div></div>")
+            out.append(f"<form method='post' action='/admin/monitor/sources/activate' "
+                       f"onsubmit=\"return confirm('سيُستعمل بحث المصادر الأرخص في كل التقارير الجديدة. متأكد؟')\">"
+                       f"<input type='hidden' name='key' value='{_e(key)}'>"
+                       f"<input type='hidden' name='version' value='{draft}'>"
+                       f"<button class='btn'>فعّل المسودة الأرخص</button></form>"
+                       "<div class='muted'>للتراجع بعد التفعيل: زر «تراجع» تحت source_search في صفحة المراقبة.</div>")
+        out.append("</body></html>")
+        return Response("".join(out), mimetype="text/html; charset=utf-8")
+    except Exception as e:
+        print("SOURCES LAB ERROR:", repr(e))
+        return jsonify({"ok": False, "error": "Failed.", "detail": repr(e)[:200]}), 500
+
+
+@bp.route("/admin/monitor/sources/draft", methods=["POST"])
+def admin_sources_draft():
+    if not _admin_ok():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 403
+    key = request.values.get("key", "")
+    try:
+        existing = _find_draft()
+        if existing:
+            msg = f"المسودة موجودة: v{existing}."
+        else:
+            engine = _d["engine"]
+            active = engine.get_active(SOURCES_PROMPT)
+            text, cfg = make_cheaper(active["text"], active["config"])
+            v = engine.create_draft(SOURCES_PROMPT, text, cfg, notes=CHEAP_NOTE, source="engine")
+            msg = f"أُنشئت المسودة v{v}. لم تُفعَّل."
+    except Exception as e:
+        print("SOURCES DRAFT ERROR:", repr(e))
+        msg = "تعذّر إنشاء المسودة."
+    return redirect(f"/admin/monitor/sources?key={quote(key)}&msg={quote(msg)}")
+
+
+@bp.route("/admin/monitor/sources/activate", methods=["POST"])
+def admin_sources_activate():
+    if not _admin_ok():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 403
+    key = request.values.get("key", "")
+    try:
+        version = int(request.form.get("version", ""))
+        if version != _find_draft():
+            msg = "هذه ليست المسودة الأرخص."
+        elif _d["engine"].activate_version(SOURCES_PROMPT, version):
+            msg = f"فُعّلت v{version}. اطلب تقريراً الآن وقارن التكلفة وعدد المصادر."
+        else:
+            msg = "تعذّر التفعيل."
+    except Exception as e:
+        print("SOURCES ACTIVATE ERROR:", repr(e))
+        msg = "حدث خطأ."
+    return redirect(f"/admin/monitor/sources?key={quote(key)}&msg={quote(msg)}")
