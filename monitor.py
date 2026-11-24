@@ -223,7 +223,7 @@ def collect():
             for v, m in sorted(versions.items()):
                 r = runs.get((name, v), {"runs": 0, "failed": 0, "lat": None, "tin": 0, "tout": 0})
                 f = fb.get((name, v), {"ratings": 0, "neg": 0})
-                rows.append({"version": v, m, r, **f, "cost": cost_usd(r["tin"], r["tout"])})
+                rows.append({"version": v, **m, **r, **f, "cost": cost_usd(r["tin"], r["tout"])})
             active = next((x for x in rows if x["status"] == "active"), None)
             prev = None
             if active:
@@ -515,7 +515,7 @@ def _run_lab(version, topic):
          "contents": f"Topic: {topic}\nImportant scientific concepts: {topic}\n"
                      f"Related scientific concepts: {topic}\nTechnical keywords: {topic}",
          "cfg": row["config"]}
-    start = import("time").perf_counter()
+    start = __import__("time").perf_counter()
     try:
         resp = engine._generate(p)
         u = getattr(resp, "usage_metadata", None)
@@ -525,7 +525,7 @@ def _run_lab(version, topic):
         sources = engine._grounding_sources(resp)
         return {"version": version, "sources": len(sources), "tin": tin, "tout": tout,
                 "cost": cost_usd(tin, tout), "chars": len(resp.text or ""),
-                "secs": round(import("time").perf_counter() - start, 1), "error": None}
+                "secs": round(__import__("time").perf_counter() - start, 1), "error": None}
     except Exception as e:
         return {"version": version, "error": (type(e).__name__ + ": " + str(e))[:150]}
 
